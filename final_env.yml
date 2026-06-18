@@ -1,0 +1,83 @@
+name: hanyuan
+
+channels:
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.11
+  - pip
+
+  - pip:
+      # ── PyTorch is installed by final_setup.sh with the cu121 index-url ──────
+      # (torch / torchvision / torchaudio omitted here on purpose)
+      # ── nvidia-* wheel deps are pulled automatically with torch ───────────────
+
+      # build tools
+      - numpy==2.2.6
+      - setuptools==80.9.0
+      - ninja==1.13.0
+      - pybind11==3.0.1
+
+      # shared
+      - einops==0.8.1
+      - opencv-python==4.12.0.88
+      - safetensors==0.6.2
+      - pillow==11.0.0
+      - omegaconf==2.3.0
+      - tqdm==4.67.1
+      - packaging==25.0
+      - filelock==3.19.1
+      - PyYAML==6.0.2
+      - requests==2.32.5
+      - regex==2025.9.18
+      - sympy==1.13.3
+      - networkx==3.3
+      - typing_extensions==4.15.0
+
+      # diffusion / model loading (hanyuan)
+      - diffusers==0.30.1
+      - transformers==4.50.0
+      - tokenizers==0.21.4
+      - accelerate==1.10.1
+      - huggingface-hub==0.34.4
+      - sentencepiece==0.2.1
+
+      # mesh processing (hanyuan)
+      - trimesh==4.8.3
+      - pymeshlab==2025.7
+      - pygltflib==1.16.5
+      - xatlas==0.0.11
+      - scipy==1.16.2
+      - scikit-image==0.25.2
+
+      # demo / serving (hanyuan)
+      - gradio==5.49.1
+      - fastapi==0.119.0
+      - uvicorn==0.37.0
+      - rembg==2.0.67
+      - onnxruntime==1.23.1
+
+      # background removal helper deps
+      - timm==1.0.20
+      - numba==0.62.1
+
+      # OpenGL (system libs installed by final_setup.sh)
+      - PyOpenGL==3.1.7
+      - PyOpenGL_accelerate==3.1.7
+
+      # misc
+      - matplotlib==3.10.7
+      - pandas==2.3.3
+      - imageio==2.37.0
+      - pooch==1.8.2
+      - orjson==3.11.3
+      - portalocker==3.2.0
+      - psutil==7.0.0
+
+      # ── These are installed by final_setup.sh (need torch already present) ───
+      # BEN2                git install with pinned commit
+      # hy3dgen             editable install from src/hy3dgen/
+      # pytorch3d           --no-build-isolation, git install
+      # custom_rasterizer   --no-build-isolation, local
+      # differentiable_renderer --no-build-isolation, local
