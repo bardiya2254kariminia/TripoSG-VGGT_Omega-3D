@@ -1,8 +1,8 @@
 set -euo pipefail
 
 # ── configurable variables ────────────────────────────────────────────────────
-CONDA_ENV_NAME="SIA32"
-ENV_FILE="hanyuan_vggt-omega_environment.yaml"
+CONDA_ENV_NAME="hanyuan"
+ENV_FILE="final_env.yml"
 
 HUNYUAN_REPO="https://github.com/Tencent-Hunyuan/Hunyuan3D-2.git"
 HUNYUAN_DIR="Hunyuan3D-2"

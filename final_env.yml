@@ -75,9 +75,20 @@ dependencies:
       - portalocker==3.2.0
       - psutil==7.0.0
 
+      # TripoSG extra deps (most TripoSG requirements are already covered above:
+      #   diffusers, transformers, einops, huggingface-hub, opencv-python,
+      #   trimesh, omegaconf, scikit-image, pymeshlab)
+      # numpy: TripoSG requirements.txt pins ==1.22.3 but that conflicts with
+      #   modern packages; numpy>=2 is used here (TripoSG works with 2.x).
+      - peft                # parameter-efficient fine-tuning (TripoSG)
+      - jaxtyping           # runtime shape annotations (TripoSG)
+      - typeguard           # runtime type checking (jaxtyping dep)
+      - diso                # differentiable isosurface extraction (TripoSG mesh export)
+
       # ── These are installed by final_setup.sh (need torch already present) ───
       # BEN2                git install with pinned commit
       # hy3dgen             editable install from src/hy3dgen/
       # pytorch3d           --no-build-isolation, git install
       # custom_rasterizer   --no-build-isolation, local
       # differentiable_renderer --no-build-isolation, local
+      # TripoSG             git clone + PYTHONPATH (no setup.py in that repo)
