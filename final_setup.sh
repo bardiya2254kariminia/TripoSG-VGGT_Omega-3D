@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # =============================================================================
-# final_setup.sh — Full Hunyuan3D-2 (hanyuan) environment setup
+# final_setup.sh — Full Hunyuan3D-2 (hanyuan) + TripoSG + MV-Adapter setup
 #
 # Usage:
-#   bash /workspace/SIA3D-Camera-inversion/final_setup.sh
+#   bash /workspace/TripoSG-VGGT_Omega-3D/final_setup.sh
 #
 # What it does (in order):
 #   1.  Creates the "hanyuan" conda env from final_env.yml
@@ -15,7 +15,14 @@
 #   7.  Compiles & installs differentiable_renderer (CUDA, --no-build-isolation)
 #   8.  Installs system OpenGL/EGL libraries via apt
 #   9.  Persists PYOPENGL_PLATFORM=egl to /workspace/.env
-#   10. Prints a quick sanity-check
+#   10. Installs VGGT-Omega (camera pose estimation backbone)
+#   11. Installs TripoSG (mesh backbone — geometry generator)
+#   12. Installs MV-Adapter (texturizing model — geometry-guided UV texturing)
+#       a. Clones the MV-Adapter repo
+#       b. Installs it (editable) + nvdiffrast (CUDA, --no-build-isolation)
+#       c. Installs cvcuda_cu12 (needed for the UV texture pipeline)
+#       d. Downloads RealESRGAN and LaMa checkpoints for the texture pipeline
+#   13. Prints a quick sanity-check
 # =============================================================================
 set -euo pipefail
 
@@ -180,6 +187,8 @@ section "11. Installing TripoSG (official guide: clone + requirements)"
 
 TRIPOSG_REPO_DIR="${SCRIPT_DIR}/triposg-repo"
 TRIPOSG_REPO_URL="https://github.com/VAST-AI-Research/TripoSG.git"
+MVADAPTER_REPO_DIR="${SCRIPT_DIR}/mvadapter-repo"
+MVADAPTER_REPO_URL="https://github.com/huanngzh/MV-Adapter.git"
 
 # ── 1. clone ──────────────────────────────────────────────────────────────────
 if [ ! -d "${TRIPOSG_REPO_DIR}/.git" ]; then
@@ -216,7 +225,110 @@ info "  ${TRIPOSG_REPO_DIR}/pretrained_weights/TripoSG  (default)"
 info "  or pass --triposg_model_path to use a custom location."
 
 # =============================================================================
-section "12. Sanity check"
+section "12. Installing MV-Adapter (texturizing model)"
+# =============================================================================
+# MV-Adapter: geometry-guided multi-view texturizing for existing 3D meshes.
+# Repo: https://github.com/huanngzh/MV-Adapter
+#
+# Steps:
+#   a. Clone the repo
+#   b. pip install editable (installs mvadapter Python package)
+#   c. Compile & install nvdiffrast (required for mesh rendering inside MVAdapter)
+#   d. Install cvcuda_cu12 (required for the UV texture pipeline)
+#   e. Download RealESRGAN and LaMa checkpoints for the texture pipeline
+
+# ── 12a. Clone ────────────────────────────────────────────────────────────────
+if [ ! -d "${MVADAPTER_REPO_DIR}/.git" ]; then
+    info "Cloning MV-Adapter → ${MVADAPTER_REPO_DIR} ..."
+    git clone "${MVADAPTER_REPO_URL}" "${MVADAPTER_REPO_DIR}"
+    info "Clone complete."
+else
+    info "MV-Adapter already cloned at ${MVADAPTER_REPO_DIR} — skipping."
+fi
+
+# ── 12b. Install editable ─────────────────────────────────────────────────────
+info "Installing MV-Adapter in editable mode ..."
+# Install without optional heavy deps first (cvcuda handled separately below)
+pip install -e "${MVADAPTER_REPO_DIR}" --no-deps
+# Install the non-CUDA runtime requirements explicitly
+pip install \
+    controlnet_aux \
+    kornia \
+    open3d \
+    "spandrel==0.4.1" \
+    pytorch-lightning \
+    gltflib
+info "MV-Adapter editable install complete."
+
+# ── 12c. Compile & install nvdiffrast ─────────────────────────────────────────
+# nvdiffrast provides differentiable rasterization; MVAdapter uses it for
+# rendering mesh views during texture generation.
+info "Compiling & installing nvdiffrast (CUDA, --no-build-isolation) ..."
+pip install --no-build-isolation \
+    git+https://github.com/NVlabs/nvdiffrast.git
+info "nvdiffrast installed."
+
+# ── 12d. Install cvcuda_cu12 ─────────────────────────────────────────────────
+# CV-CUDA is needed for the TexturePipeline view-upscaling step.
+# It is tightly tied to the CUDA version — install the cu12 wheel which covers
+# CUDA 12.x toolkit (this image ships PyTorch cu121).
+info "Installing cvcuda_cu12 ..."
+pip install cvcuda_cu12 || warn "cvcuda_cu12 install failed — texture pipeline upscaling may be unavailable."
+
+# ── 12e. Download texture-pipeline checkpoints ───────────────────────────────
+CKPT_DIR="${SCRIPT_DIR}/checkpoints"
+mkdir -p "${CKPT_DIR}"
+
+REALESRGAN_CKPT="${CKPT_DIR}/RealESRGAN_x2plus.pth"
+LAMA_CKPT="${CKPT_DIR}/big-lama.pt"
+
+if [ ! -f "${REALESRGAN_CKPT}" ]; then
+    info "Downloading RealESRGAN_x2plus.pth ..."
+    wget -q --show-progress \
+        "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth" \
+        -O "${REALESRGAN_CKPT}" \
+    && info "RealESRGAN checkpoint → ${REALESRGAN_CKPT}" \
+    || warn "RealESRGAN download failed — MVAdapterTexturizer will auto-download on first use."
+else
+    info "RealESRGAN checkpoint already present — ${REALESRGAN_CKPT}"
+fi
+
+if [ ! -f "${LAMA_CKPT}" ]; then
+    info "Downloading big-lama.pt ..."
+    wget -q --show-progress \
+        "https://github.com/Sanster/models/releases/download/add_big_lama/big-lama.pt" \
+        -O "${LAMA_CKPT}" \
+    && info "LaMa checkpoint → ${LAMA_CKPT}" \
+    || warn "LaMa download failed — MVAdapterTexturizer will auto-download on first use."
+else
+    info "LaMa checkpoint already present — ${LAMA_CKPT}"
+fi
+
+# ── add mvadapter-repo to PYTHONPATH so `from scripts.inference_*` works ──────
+if ! python -c "import mvadapter" 2>/dev/null; then
+    export PYTHONPATH="${MVADAPTER_REPO_DIR}:${PYTHONPATH:-}"
+    if ! grep -q "mvadapter-repo" "${WORKSPACE_ENV}" 2>/dev/null; then
+        echo "export PYTHONPATH=\"${MVADAPTER_REPO_DIR}:\${PYTHONPATH}\"" >> "${WORKSPACE_ENV}"
+        info "Persisted MV-Adapter PYTHONPATH to ${WORKSPACE_ENV}"
+    fi
+else
+    info "mvadapter already importable — skipping PYTHONPATH update."
+fi
+
+python -c "
+import mvadapter
+print('  mvadapter OK')
+from mvadapter.pipelines.pipeline_texture import TexturePipeline
+print('  mvadapter.pipelines.pipeline_texture OK')
+" || warn "mvadapter import check failed — verify the install at ${MVADAPTER_REPO_DIR}."
+
+info "MV-Adapter ready."
+info "  Checkpoints: ${CKPT_DIR}/RealESRGAN_x2plus.pth"
+info "              ${CKPT_DIR}/big-lama.pt"
+info "  Texture backends now available: 'hunyuan', 'mvadapter', 'triposg'"
+
+# =============================================================================
+section "13. Sanity check"
 # =============================================================================
 python -c "
 import torch
@@ -242,9 +354,22 @@ print(f'  pytorch3d {pytorch3d.__version__} OK')
 
 try:
     from triposg.pipelines.pipeline_triposg import TripoSGPipeline
-    print(f'  triposg (TripoSGPipeline) OK')
+    print(f'  triposg backbone (TripoSGPipeline) OK')
 except Exception as e:
     print(f'  triposg FAIL: {e}')
+
+try:
+    import mvadapter
+    from mvadapter.pipelines.pipeline_texture import TexturePipeline
+    print(f'  mvadapter (TexturePipeline) OK')
+except Exception as e:
+    print(f'  mvadapter FAIL: {e}')
+
+try:
+    import nvdiffrast
+    print(f'  nvdiffrast OK')
+except Exception as e:
+    print(f'  nvdiffrast FAIL: {e}')
 
 import os
 print(f'  PYOPENGL_PLATFORM = {os.environ.get(\"PYOPENGL_PLATFORM\", \"NOT SET\")}')
@@ -255,3 +380,8 @@ info "All done. To use the environment:"
 info "  eval \"\$(/opt/miniforge3/bin/conda shell.bash hook)\""
 info "  conda activate ${CONDA_ENV}"
 info "  export PYOPENGL_PLATFORM=egl   # (or source /workspace/.env)"
+info ""
+info "Texture backends:"
+info "  hunyuan   — python mesh/inference.py --image photo.png --texture_backend hunyuan"
+info "  mvadapter — python mesh/inference.py --image photo.png --texture_backend mvadapter"
+info "  triposg   — python mesh/inference.py --image photo.png --texture_backend triposg"

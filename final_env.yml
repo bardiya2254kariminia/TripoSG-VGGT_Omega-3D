@@ -45,7 +45,7 @@ dependencies:
 
       # mesh processing (hanyuan)
       - trimesh==4.8.3
-      - pymeshlab==2025.7
+      - pymeshlab==2022.2.post3  # pinned for MV-Adapter compatibility (needs Percentage class)
       - pygltflib==1.16.5
       - xatlas==0.0.11
       - scipy==1.16.2
@@ -80,10 +80,22 @@ dependencies:
       #   trimesh, omegaconf, scikit-image, pymeshlab)
       # numpy: TripoSG requirements.txt pins ==1.22.3 but that conflicts with
       #   modern packages; numpy>=2 is used here (TripoSG works with 2.x).
-      - peft                # parameter-efficient fine-tuning (TripoSG)
+      - peft                # parameter-efficient fine-tuning (TripoSG / MVAdapter)
       - jaxtyping           # runtime shape annotations (TripoSG)
       - typeguard           # runtime type checking (jaxtyping dep)
       - diso                # differentiable isosurface extraction (TripoSG mesh export)
+
+      # MVAdapter extra deps (geometry-guided multi-view texturizing)
+      # Most MVAdapter requirements are already covered above:
+      #   diffusers, transformers, peft, accelerate, huggingface-hub,
+      #   opencv-python, safetensors, pillow, omegaconf, trimesh, einops,
+      #   timm, scikit-image, sentencepiece, pymeshlab, gradio
+      - kornia              # MVAdapter image geometry transforms
+      - open3d              # MVAdapter mesh processing (texture pipeline)
+      - spandrel==0.4.1     # MVAdapter upscaler model loader (RealESRGAN wrapper)
+      - controlnet_aux      # MVAdapter ControlNet pre-processors
+      - pytorch-lightning   # MVAdapter training framework (needed for full install)
+      - gltflib             # MVAdapter texture pipeline — writes final .glb file
 
       # ── These are installed by final_setup.sh (need torch already present) ───
       # BEN2                git install with pinned commit
@@ -92,3 +104,7 @@ dependencies:
       # custom_rasterizer   --no-build-isolation, local
       # differentiable_renderer --no-build-isolation, local
       # TripoSG             git clone + PYTHONPATH (no setup.py in that repo)
+      # MV-Adapter          git clone + pip install -e + nvdiffrast (no-build-isolation)
+      #   Checkpoints:  RealESRGAN_x2plus.pth  (auto-downloaded)
+      #                 big-lama.pt             (auto-downloaded)
+      # cvcuda_cu12     installed by final_setup.sh (CUDA version must match)
