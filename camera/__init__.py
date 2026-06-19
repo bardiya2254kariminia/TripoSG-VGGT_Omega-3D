@@ -2,26 +2,21 @@
 Camera pose estimation and mesh rendering package.
 
 Mesh-generation backends:
-  hanyuan  — Hunyuan3D-2 (MeshGenerator / HunyuanRenderer)
+  hanyuan  — Hunyuan3D-2 (MeshGenerator / Renderer)
   trellis  — TRELLIS.2-4B (TrellisMeshGenerator / TrellisRenderer, optional)
 
-Pose estimation models:
-  vggt        — Facebook's VGGT-1B (CameraPoseFinder)
+Pose estimation:
   vggt_omega  — Facebook's VGGT-Omega (Omega_CameraPoseFinder)
 
 Recommended usage:
-    from camera import create_pose_finder
+    from camera import Omega_CameraPoseFinder, load_vggt_omega
 
-    pose_finder = create_pose_finder(
-        mesh_pth="mesh.glb",
-        image_size=512,
-        device="cuda",
-        pose_model="vggt",      # or "vggt_omega"
-        backend="hanyuan"       # or "trellis" (requires trellis2 install)
-    )
+    vggt_model = load_vggt_omega(checkpoint_path, device="cuda")
+    pose_finder = Omega_CameraPoseFinder(vggt_model, image_size=512, device="cuda")
+    pose_finder.set_mesh("mesh.glb")
 """
 
-from .models.hanyuan import MeshGenerator, HunyuanRenderer
+from .models.hanyuan import MeshGenerator, Renderer
 
 try:
     from .models.trellis import TrellisMeshGenerator, TrellisRenderer
@@ -43,27 +38,27 @@ try:
     from .camera_pose_finder import (
         CameraPoseFinder,
         Omega_CameraPoseFinder,
-        create_pose_finder,
+        load_vggt_omega,
         compute_new_pose_from_relative,
     )
 except ImportError:
     CameraPoseFinder = None  # type: ignore[misc, assignment]
     Omega_CameraPoseFinder = None  # type: ignore[misc, assignment]
-    create_pose_finder = None  # type: ignore[misc, assignment]
+    load_vggt_omega = None  # type: ignore[misc, assignment]
     compute_new_pose_from_relative = None  # type: ignore[misc, assignment]
 
 __all__ = [
     # Hunyuan backend
     'MeshGenerator',
-    'HunyuanRenderer',
+    'Renderer',
     # TRELLIS backend (None if trellis2 not installed)
     'TrellisMeshGenerator',
     'TrellisRenderer',
     'TrellisPipelineManager',
     'build_trellis_mesh',
     'default_glb_path',
-    # Pose estimation (model-agnostic via factory)
-    'create_pose_finder',
+    # Pose estimation
+    'load_vggt_omega',
     'CameraPoseFinder',
     'Omega_CameraPoseFinder',
     'compute_new_pose_from_relative',

@@ -4,7 +4,7 @@ Hunyuan3D mesh generation/rendering, TripoSG mesh backbone, and MVAdapter textur
 Classes:
   MeshGenerator        — generate 3D meshes from images via Hunyuan3D-2, with
                          pluggable texturizing backends (Hunyuan paint, MVAdapter).
-  HunyuanRenderer      — render .glb meshes with PyTorch3D.
+  Renderer             — render .glb meshes with PyTorch3D.
   TripoSGMeshBackbone  — generate complete watertight meshes (geometry + colour)
                          from a single image via TripoSG (VAST-AI/TripoSG).
                          This is a *mesh backbone* model, not a texturizer — it
@@ -318,6 +318,17 @@ class MVAdapterTexturizer:
     """
 
     MV_ADAPTER_REPO_URL = "https://github.com/huanngzh/MV-Adapter.git"
+    # stabilityai/stable-diffusion-2-1-base was removed from the Hub; use a diffusers mirror.
+    SD21_BASE_MODEL_DEFAULT = "Manojb/stable-diffusion-2-1-base"
+    SD21_DIFFUSERS_ALLOW_PATTERNS = (
+        "model_index.json",
+        "scheduler/*",
+        "text_encoder/*",
+        "tokenizer/*",
+        "unet/*",
+        "vae/*",
+        "feature_extractor/*",
+    )
     REALESRGAN_URL = (
         "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/"
         "RealESRGAN_x2plus.pth"
@@ -338,6 +349,7 @@ class MVAdapterTexturizer:
         seed: int = -1,
         checkpoints_dir: str = None,
         mvadapter_repo_dir: str = None,
+        sd21_base_model: str = None,
     ):
         """
         Args:
@@ -357,6 +369,10 @@ class MVAdapterTexturizer:
                              folder inside this repository.
             mvadapter_repo_dir: Path to the cloned MV-Adapter repository.
                                 Auto-detected from common locations if ``None``.
+            sd21_base_model: HuggingFace repo ID or local diffusers directory for
+                             SD2.1 (used when ``variant="sd21"``).  Defaults to
+                             ``MVADAPTER_SD21_BASE_MODEL`` env var, then auto-downloads
+                             to ``checkpoints/stable-diffusion-2-1-base`` on first use.
         """
         assert variant in ("sdxl", "sd21"), f"variant must be 'sdxl' or 'sd21', got {variant!r}"
         self.variant = variant
@@ -375,6 +391,7 @@ class MVAdapterTexturizer:
             )
             checkpoints_dir = os.path.join(_repo_root, "checkpoints")
         self.checkpoints_dir = checkpoints_dir
+        self.sd21_base_model = self._resolve_sd21_base_model(sd21_base_model)
         self.upscaler_ckpt = os.path.join(checkpoints_dir, "RealESRGAN_x2plus.pth")
         self.inpaint_ckpt  = os.path.join(checkpoints_dir, "big-lama.pt")
 
@@ -382,6 +399,96 @@ class MVAdapterTexturizer:
         self._mvadapter_repo = mvadapter_repo_dir
         self._mv_pipe = None
         self._tex_pipe = None
+
+    @classmethod
+    def default_sd21_local_dir(cls, checkpoints_dir: str = None) -> str:
+        """Return the default on-disk path for the SD2.1 diffusers checkpoint."""
+        if checkpoints_dir is None:
+            _repo_root = os.path.dirname(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            )
+            checkpoints_dir = os.path.join(_repo_root, "checkpoints")
+        return os.path.join(checkpoints_dir, "stable-diffusion-2-1-base")
+
+    @classmethod
+    def _is_local_diffusers_dir(cls, path: str) -> bool:
+        return os.path.isfile(os.path.join(path, "model_index.json"))
+
+    def _resolve_sd21_base_model(self, sd21_base_model: str = None) -> str:
+        """
+        Pick the SD2.1 base model source (local path or HF repo id).
+
+        Priority:
+          1. explicit argument
+          2. MVADAPTER_SD21_BASE_MODEL env var
+          3. local checkpoints/stable-diffusion-2-1-base (if model_index.json exists)
+          4. community HF mirror (:data:`SD21_BASE_MODEL_DEFAULT`) — downloaded on first use
+        """
+        if sd21_base_model:
+            return sd21_base_model
+
+        env_model = os.environ.get("MVADAPTER_SD21_BASE_MODEL")
+        if env_model:
+            return env_model
+
+        local_dir = self.default_sd21_local_dir(self.checkpoints_dir)
+        if self._is_local_diffusers_dir(local_dir):
+            return local_dir
+
+        return self.SD21_BASE_MODEL_DEFAULT
+
+    def _ensure_sd21_base_model(self) -> None:
+        """
+        Ensure the SD2.1 diffusers checkpoint is available locally.
+
+        stabilityai/stable-diffusion-2-1-base was removed from Hugging Face; when
+        ``self.sd21_base_model`` is a Hub repo id (or the default mirror), this
+        downloads the diffusers components into
+        ``checkpoints/stable-diffusion-2-1-base/``.
+        """
+        if self.variant != "sd21":
+            return
+
+        if self._is_local_diffusers_dir(self.sd21_base_model):
+            return
+
+        if os.path.isdir(self.sd21_base_model):
+            raise FileNotFoundError(
+                f"SD2.1 base model directory is missing model_index.json: "
+                f"{self.sd21_base_model}"
+            )
+
+        local_dir = self.default_sd21_local_dir(self.checkpoints_dir)
+        marker = os.path.join(local_dir, "model_index.json")
+        if os.path.isfile(marker):
+            self.sd21_base_model = local_dir
+            return
+
+        hf_repo = self.sd21_base_model or self.SD21_BASE_MODEL_DEFAULT
+        os.makedirs(local_dir, exist_ok=True)
+
+        try:
+            from huggingface_hub import snapshot_download
+        except ImportError as exc:
+            raise RuntimeError(
+                "huggingface_hub is required to download the SD2.1 base model. "
+                "Install it with: pip install huggingface_hub"
+            ) from exc
+
+        print(f"[MVAdapter] Downloading SD2.1 base model from {hf_repo} → {local_dir} ...")
+        snapshot_download(
+            repo_id=hf_repo,
+            local_dir=local_dir,
+            allow_patterns=list(self.SD21_DIFFUSERS_ALLOW_PATTERNS),
+        )
+
+        if not os.path.isfile(marker):
+            raise RuntimeError(
+                f"SD2.1 download finished but model_index.json is missing in {local_dir}"
+            )
+
+        self.sd21_base_model = local_dir
+        print(f"[MVAdapter] SD2.1 base model ready → {local_dir}")
 
     # ── MVAdapter repo discovery ───────────────────────────────────────────
 
@@ -438,6 +545,7 @@ class MVAdapterTexturizer:
     def _load_mv_pipeline_image(self):
         """Load the image-geometry → multi-view pipeline (ig2mv)."""
         self._ensure_mvadapter_repo()
+        self._ensure_sd21_base_model()
 
         if self.variant == "sdxl":
             from scripts.inference_ig2mv_sdxl import prepare_pipeline
@@ -445,10 +553,10 @@ class MVAdapterTexturizer:
             vae_model  = "madebyollin/sdxl-vae-fp16-fix"
         else:
             from scripts.inference_ig2mv_sd import prepare_pipeline
-            base_model = "stabilityai/stable-diffusion-2-1-base"
+            base_model = self.sd21_base_model
             vae_model  = None
 
-        print(f"[MVAdapter] Loading ig2mv pipeline ({self.variant}) ...")
+        print(f"[MVAdapter] Loading ig2mv pipeline ({self.variant}, base={base_model}) ...")
         pipe = prepare_pipeline(
             base_model=base_model,
             vae_model=vae_model,
@@ -466,6 +574,7 @@ class MVAdapterTexturizer:
     def _load_mv_pipeline_text(self):
         """Load the text-geometry → multi-view pipeline (tg2mv)."""
         self._ensure_mvadapter_repo()
+        self._ensure_sd21_base_model()
 
         if self.variant == "sdxl":
             from scripts.inference_tg2mv_sdxl import prepare_pipeline
@@ -473,10 +582,10 @@ class MVAdapterTexturizer:
             vae_model  = "madebyollin/sdxl-vae-fp16-fix"
         else:
             from scripts.inference_tg2mv_sd import prepare_pipeline
-            base_model = "stabilityai/stable-diffusion-2-1-base"
+            base_model = self.sd21_base_model
             vae_model  = None
 
-        print(f"[MVAdapter] Loading tg2mv pipeline ({self.variant}) ...")
+        print(f"[MVAdapter] Loading tg2mv pipeline ({self.variant}, base={base_model}) ...")
         pipe = prepare_pipeline(
             base_model=base_model,
             vae_model=vae_model,
@@ -1022,9 +1131,9 @@ class MeshGenerator:
             self.painted_mesh.export(path)
 
 
-# ── HunyuanRenderer ──────────────────────────────────────────────────────────
+# ── Renderer ─────────────────────────────────────────────────────────────────
 
-class HunyuanRenderer:
+class Renderer:
     """
     Renders 3D meshes loaded from .glb files using PyTorch3D.
     """

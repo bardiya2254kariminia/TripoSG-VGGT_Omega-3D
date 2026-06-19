@@ -83,7 +83,7 @@ dependencies:
       - peft                # parameter-efficient fine-tuning (TripoSG / MVAdapter)
       - jaxtyping           # runtime shape annotations (TripoSG)
       - typeguard           # runtime type checking (jaxtyping dep)
-      - diso                # differentiable isosurface extraction (TripoSG mesh export)
+      # - diso                # differentiable isosurface extraction (TripoSG mesh export)
 
       # MVAdapter extra deps (geometry-guided multi-view texturizing)
       # Most MVAdapter requirements are already covered above:

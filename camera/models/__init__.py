@@ -18,7 +18,7 @@ Backward compat alias:
 """
 
 from .hanyuan import (
-    HunyuanRenderer,
+    Renderer,
     MeshGenerator,
     MVAdapterTexturizer,
     TripoSGMeshBackbone,
@@ -27,7 +27,7 @@ from .hanyuan import (
 
 __all__ = [
     "MeshGenerator",
-    "HunyuanRenderer",
+    "Renderer",
     "TripoSGMeshBackbone",
     "TripoSGTexturizer",       # backward compat — same as TripoSGMeshBackbone
     "MVAdapterTexturizer",

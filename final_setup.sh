@@ -304,6 +304,9 @@ else
     info "LaMa checkpoint already present — ${LAMA_CKPT}"
 fi
 
+# SD2.1 base model for MV-Adapter sd21 variant is auto-downloaded on first use
+# by MVAdapterTexturizer (see camera/models/hanyuan.py).
+
 # ── add mvadapter-repo to PYTHONPATH so `from scripts.inference_*` works ──────
 if ! python -c "import mvadapter" 2>/dev/null; then
     export PYTHONPATH="${MVADAPTER_REPO_DIR}:${PYTHONPATH:-}"

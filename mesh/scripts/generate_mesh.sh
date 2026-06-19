@@ -29,6 +29,7 @@
 #   MVADAPTER_TEXT       Optional text prompt        (default: image-conditioned)
 #   MVADAPTER_CHECKPOINTS  Directory with RealESRGAN/LaMa (auto-downloaded if unset)
 #   MVADAPTER_REPO       Path to MV-Adapter repo     (auto-detected if unset)
+#   MVADAPTER_SD21_BASE_MODEL  Local path or HF repo for SD2.1 base (auto-downloaded if unset)
 #
 # Usage:
 #   bash mesh/scripts/generate_mesh.sh
@@ -85,6 +86,7 @@ MVADAPTER_SEED="${MVADAPTER_SEED:--1}"
 MVADAPTER_TEXT="${MVADAPTER_TEXT:-}"
 MVADAPTER_CHECKPOINTS="${MVADAPTER_CHECKPOINTS:-}"
 MVADAPTER_REPO="${MVADAPTER_REPO:-}"
+MVADAPTER_SD21_BASE_MODEL="${MVADAPTER_SD21_BASE_MODEL:-}"
 
 # ── validation ────────────────────────────────────────────────────────────────
 cd "${REPO_ROOT}"
@@ -175,6 +177,7 @@ if [ "${TEXTURE_BACKEND}" = "mvadapter" ]; then
     [ -n "${MVADAPTER_TEXT}" ]        && COMMON_ARGS+=(--mvadapter_text "${MVADAPTER_TEXT}")
     [ -n "${MVADAPTER_CHECKPOINTS}" ] && COMMON_ARGS+=(--mvadapter_checkpoints "${MVADAPTER_CHECKPOINTS}")
     [ -n "${MVADAPTER_REPO}" ]        && COMMON_ARGS+=(--mvadapter_repo "${MVADAPTER_REPO}")
+    [ -n "${MVADAPTER_SD21_BASE_MODEL}" ] && COMMON_ARGS+=(--mvadapter_sd21_base_model "${MVADAPTER_SD21_BASE_MODEL}")
 fi
 
 # Common flags

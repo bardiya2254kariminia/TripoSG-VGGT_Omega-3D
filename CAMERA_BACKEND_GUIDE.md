@@ -43,7 +43,7 @@ VGGT-Omega     TRELLIS             TRELLIS.2
 
 ### Hanyuan (Default)
 - **Model**: Hunyuan3D-2 + PyTorch3D
-- **Classes**: `MeshGenerator`, `HunyuanRenderer`
+- **Classes**: `MeshGenerator`, `Renderer`
 - **Pros**:
   - Established pipeline
   - Good quality meshes

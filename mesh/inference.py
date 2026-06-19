@@ -219,6 +219,16 @@ def parse_args() -> argparse.Namespace:
             f"Auto-detected from {os.path.join(REPO_ROOT, 'mvadapter-repo')} if absent."
         ),
     )
+    mvadapter_group.add_argument(
+        "--mvadapter_sd21_base_model", default=None,
+        help=(
+            "HuggingFace repo ID or local diffusers directory for SD2.1 "
+            "(used when --mvadapter_variant=sd21). "
+            "Defaults to MVADAPTER_SD21_BASE_MODEL env var, then "
+            f"{os.path.join(REPO_ROOT, 'checkpoints/stable-diffusion-2-1-base')} "
+            "(auto-downloaded on first use if missing)."
+        ),
+    )
 
     # ── TripoSG backbone options ──────────────────────────────────────────────
     triposg_group = parser.add_argument_group("TripoSG mesh backbone options")
@@ -355,6 +365,7 @@ def main() -> None:
             seed=args.mvadapter_seed,
             checkpoints_dir=args.mvadapter_checkpoints,
             mvadapter_repo_dir=args.mvadapter_repo,
+            sd21_base_model=args.mvadapter_sd21_base_model,
         )
 
         mv_save_dir  = output_dir

@@ -1,46 +1,31 @@
 """
 Camera pose estimation using VGGT-Omega.
 
-Pose model backend:
-  "vggt_omega"  — Facebook's VGGT-Omega (Omega_CameraPoseFinder)
-
-Mesh-generation / rendering backends:
-  "hanyuan"  — Hunyuan3D-2 + PyTorch3D (camera.models.hanyuan)
-  "trellis"  — TRELLIS.2-4B + PyTorch3D (camera.models.trellis)
-
 Usage:
-    pose_finder = create_pose_finder(
-        mesh_pth="mesh.glb",
-        image_size=512,
-        device="cuda",
-        backend="hanyuan",           # or "trellis"
-        checkpoint_path="/workspace/checkpoints/vggt-omega/vggt_omega_1b_512.pt",
-    )
+    from camera import Omega_CameraPoseFinder, load_vggt_omega
 
-    # Or instantiate directly:
-    pose_finder = Omega_CameraPoseFinder(
-        mesh_pth="mesh.glb",
-        image_size=512,
-        device="cuda",
-        checkpoint_path="path/to/checkpoint.pt",
-        backend="hanyuan",
+    device = "cuda"
+    vggt_model = load_vggt_omega(checkpoint_path, device)
+
+    pose_finder = Omega_CameraPoseFinder(vggt_model, image_size=512, device=device, output_dir="out/obj")
+    pose_finder.set_mesh("mesh.glb")
+    all_Rs, all_Ts = pose_finder.generate_initial_views(50, "obj")
+    extrinsic, intrinsic = pose_finder.get_vggt_initial_guess(
+        "query.png", all_Rs, all_Ts, "obj"
     )
 """
 
 import contextlib
-import gc
 import os
 import shutil
 import sys
-from typing import Literal
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from PIL import Image
 
-# renderers
-from camera.models.hanyuan import HunyuanRenderer
+from camera.models.hanyuan import Renderer
 
 # VGGT-Omega imports
 try:
@@ -58,21 +43,24 @@ except ImportError as e:
     sys.exit(1)
 
 
-# ── Renderer factory ──────────────────────────────────────────────────────────
+# ── VGGT-Omega loader ─────────────────────────────────────────────────────────
 
-def _build_renderer(backend: str, mesh_pth: str, device):
-    """
-    Instantiate the appropriate mesh renderer based on the backend name.
-
-    Args:
-        backend: "hanyuan".
-        mesh_pth: Path to the .glb mesh file.
-        device: torch device or device string.
-
-    Returns:
-        HunyuanRenderer instance.
-    """
-    return HunyuanRenderer(mesh_pth, device)
+def load_vggt_omega(
+    checkpoint_path: str,
+    device,
+    enable_alignment: bool = False,
+) -> VGGTOmega:
+    """Load VGGT-Omega once and reuse across multiple meshes/images."""
+    dev = torch.device(device) if not isinstance(device, torch.device) else device
+    print("Loading VGGT-Omega model...")
+    model = VGGTOmega(enable_alignment=enable_alignment).to(dev)
+    state_dict = torch.load(checkpoint_path, map_location="cpu")
+    if isinstance(state_dict, dict) and "state_dict" in state_dict:
+        state_dict = state_dict["state_dict"]
+    model.load_state_dict(state_dict)
+    model.eval()
+    print("VGGT-Omega model loaded.")
+    return model
 
 
 # ── Omega_CameraPoseFinder ────────────────────────────────────────────────────
@@ -81,81 +69,67 @@ class Omega_CameraPoseFinder:
     """
     Camera pose estimator backed by VGGT-Omega.
 
+    Load VGGT-Omega once via :func:`load_vggt_omega`, pass it here, then call
+    :meth:`set_mesh` before each object. The pose model stays in memory; only
+    the mesh renderer is swapped per object.
+
     Workflow:
-      1. Render known views of the mesh at multiple radii / angles.
-      2. Feed the known views + the target image to VGGT-Omega.
-      3. Find the closest known view by rotation similarity to seed the
-         camera-distance search.
-      4. Refine the translation magnitude with a binary search over rendered MSE.
+      1. :meth:`set_mesh` — attach a .glb for rendering.
+      2. :meth:`generate_initial_views` — render known views at multiple radii.
+      3. :meth:`get_vggt_initial_guess` — estimate pose for a query image.
     """
 
     def __init__(
         self,
-        mesh_pth: str,
+        vggt_model: VGGTOmega,
         image_size,
         device,
+        output_dir: str,
         dist: float = 3.0,
         fov: float = 40,
-        checkpoint_path: str = "/workspace/checkpoints/checkpoints_vggt-omega/vggt_omega_1b_512.pt",
         model_image_resolution: int = 512,
-        enable_alignment: bool = False,
-        backend: Literal["hanyuan", "trellis"] = "hanyuan",
     ):
         """
         Args:
-            mesh_pth: Path to the .glb mesh file.
+            vggt_model: Pre-loaded VGGT-Omega model (from :func:`load_vggt_omega`).
             image_size: Render resolution — int or (H, W) tuple.
             device: "cuda" or "cpu".
+            output_dir: Directory for intermediate renders (temp_views, temp_views2).
             dist: Default camera distance from origin.
             fov: Field of view in degrees (informational).
-            checkpoint_path: Path to the VGGT-Omega checkpoint .pt file.
-            model_image_resolution: Resolution images are resized to before
-                                    feeding to VGGT-Omega (e.g. 512).
-            enable_alignment: Enable VGGT-Omega's alignment module.
-            backend: Renderer backend — "hanyuan" (HunyuanRenderer) or
-                     "trellis" (TrellisRenderer).
+            model_image_resolution: Resolution fed to VGGT-Omega (e.g. 512).
         """
+        self.vggt_model = vggt_model
         self.original_image_size = (
             image_size if isinstance(image_size, (list, tuple)) else (image_size, image_size)
         )
         self.device = torch.device(device) if not isinstance(device, torch.device) else device
+        self.output_dir = output_dir
         self.dist = dist
         self.fov = fov
-        self.checkpoint_path = checkpoint_path
         self.model_image_resolution = model_image_resolution
-        self.enable_alignment = enable_alignment
-        self.backend = backend
 
-        self.mesh_renderer = _build_renderer(backend, mesh_pth, self.device)
-        self.vggt_model = None
+        self.mesh_renderer = None
         self.known_image_paths = []
         self.known_radii = []
 
-        self.view_path = "./temp_views"
+        self.view_path = os.path.join(output_dir, "temp_views")
+        self.debug_view_path = os.path.join(output_dir, "temp_views2")
+        os.makedirs(output_dir, exist_ok=True)
         shutil.rmtree(self.view_path, ignore_errors=True)
+        shutil.rmtree(self.debug_view_path, ignore_errors=True)
         os.makedirs(self.view_path, exist_ok=True)
+        os.makedirs(self.debug_view_path, exist_ok=True)
 
-    # ── VGGT-Omega load / unload ──────────────────────────────────────────────
+    def set_mesh(self, mesh_pth: str) -> None:
+        """Load (or swap to) the mesh used for view rendering and pose refinement."""
+        self.mesh_renderer = Renderer(mesh_pth, self.device)
+        self.known_image_paths = []
+        self.known_radii = []
 
-    def _load_vggt(self):
-        if self.vggt_model is None:
-            print("Loading VGGT-Omega model...")
-            self.vggt_model = VGGTOmega(enable_alignment=self.enable_alignment).to(self.device)
-            state_dict = torch.load(self.checkpoint_path, map_location="cpu")
-            if isinstance(state_dict, dict) and "state_dict" in state_dict:
-                state_dict = state_dict["state_dict"]
-            self.vggt_model.load_state_dict(state_dict)
-            self.vggt_model.eval()
-            print("VGGT-Omega model loaded.")
-
-    def _unload_vggt(self):
-        if self.vggt_model is not None:
-            del self.vggt_model
-            self.vggt_model = None
-            gc.collect()
-            if self.device.type == "cuda":
-                torch.cuda.empty_cache()
-            print("VGGT-Omega model unloaded.")
+    def _require_mesh_renderer(self) -> None:
+        if self.mesh_renderer is None:
+            raise RuntimeError("Call set_mesh(mesh_pth) before rendering or pose estimation.")
 
     # ── Camera matrix helper ──────────────────────────────────────────────────
 
@@ -191,6 +165,8 @@ class Omega_CameraPoseFinder:
         Generate known views at multiple radii so VGGT-Omega has visual context
         at every plausible camera distance.
         """
+        self._require_mesh_renderer()
+
         if radii is None:
             radii = [1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0]
 
@@ -205,8 +181,6 @@ class Omega_CameraPoseFinder:
         all_Rs = []
         all_Ts = []
 
-        os.makedirs("./temp_views", exist_ok=True)
-
         for radius in radii:
             for azimuth in azimuths:
                 for elevation in elevations:
@@ -219,7 +193,7 @@ class Omega_CameraPoseFinder:
                     )
                     rendered_image = rendered_image[0, ..., :3].cpu().numpy()
 
-                    path = f"temp_views/{img_name}_{num_of_views}.png"
+                    path = os.path.join(self.view_path, f"{img_name}_{num_of_views}.png")
                     plt.imsave(path, rendered_image)
                     self.known_image_paths.append(path)
                     self.known_radii.append(radius)
@@ -234,11 +208,8 @@ class Omega_CameraPoseFinder:
     # ── VGGT-Omega depth helper ───────────────────────────────────────────────
 
     def _get_omega_depth_estimate(self, predictions, target_index):
-        """
-        Use VGGT-Omega's predicted depth map as a coarse distance estimate.
-        """
         try:
-            depth_predictions = predictions["depth"]  # [B, S, H, W, 1]
+            depth_predictions = predictions["depth"]
             target_depth_map = depth_predictions[0, target_index]
 
             if target_depth_map.ndim == 3:
@@ -260,10 +231,6 @@ class Omega_CameraPoseFinder:
     # ── Render-and-compare helper ─────────────────────────────────────────────
 
     def _render_and_compare(self, target_img_np, R_np, dist):
-        """
-        Render the mesh from rotation R_np at the given distance and
-        return the MSE against the target image (values in [0, 1]).
-        """
         forward = -R_np[2, :]
         cam_pos_at_dist = forward * (-dist)
         T_new = -R_np @ cam_pos_at_dist.reshape(3, 1)
@@ -282,16 +249,11 @@ class Omega_CameraPoseFinder:
         else:
             target_resized = target_img_np
 
-        mse = np.mean((rendered_np - target_resized) ** 2)
-        return mse
+        return np.mean((rendered_np - target_resized) ** 2)
 
     # ── Binary search for best distance ──────────────────────────────────────
 
     def _binary_search_distance(self, target_img_np, R_np, low, high, iters=6):
-        """
-        Binary search over camera distance, probing MSE at midpoint ± delta
-        and shrinking the range toward the lower-error side.
-        """
         print(f"Binary search for distance in [{low:.2f}, {high:.2f}]")
 
         for i in range(iters):
@@ -321,17 +283,8 @@ class Omega_CameraPoseFinder:
         """
         Estimate the camera pose for target_image_path given pre-rendered
         known views stored in self.known_image_paths / self.known_radii.
-
-        Args:
-            target_image_path: Path to the query image whose pose we want.
-            all_Rs: list of (3, 3) rotation tensors for each known view.
-            all_Ts: list of (3, 1) translation tensors for each known view.
-            img_name: Prefix for debug render filenames.
-
-        Returns:
-            (target_extrinsic, target_intrinsic) — 4×4 and 3×3 tensors.
         """
-        self._load_vggt()
+        self._require_mesh_renderer()
 
         all_image_paths = self.known_image_paths + [target_image_path]
         target_index = len(all_image_paths) - 1
@@ -358,10 +311,8 @@ class Omega_CameraPoseFinder:
                 predictions["images"].shape[-2:],
             )
 
-            # Step 1: coarse depth from VGGT-Omega depth head
             omega_depth_estimate = self._get_omega_depth_estimate(predictions, target_index)
 
-        # Step 2: find closest known view by rotation similarity
         target_pose = extrinsic[0][target_index]
         best_known_idx = None
         best_similarity = float("inf")
@@ -379,9 +330,7 @@ class Omega_CameraPoseFinder:
             f"(pose diff={best_similarity:.4f})"
         )
 
-        # Step 3: combine depth estimate + sampling radius
         if omega_depth_estimate is not None:
-            # weight sampling radius more (0.6) — VGGT-Omega depth can be noisy
             initial_dist_estimate = 0.6 * sampling_radius + 0.4 * omega_depth_estimate
             search_margin = 0.8
         else:
@@ -395,7 +344,6 @@ class Omega_CameraPoseFinder:
             f"search range: [{search_low:.2f}, {search_high:.2f}]"
         )
 
-        # Step 4: align rotation using first known view as reference
         R_reference = all_Rs[0]
         M_reference = torch.eye(4, device=self.device)
         M_reference[0:3, :3] = R_reference
@@ -405,7 +353,6 @@ class Omega_CameraPoseFinder:
         M_aligned_target = torch.matmul(M_vggt_target, M_reference)
         R_target_np = M_aligned_target[0:3, :3].cpu().numpy()
 
-        # Step 5: binary search for best distance
         target_img_np = np.array(
             Image.open(target_image_path).convert("RGB").resize(self.original_image_size)
         ) / 255.0
@@ -414,7 +361,6 @@ class Omega_CameraPoseFinder:
             target_img_np, R_target_np, search_low, search_high, iters=6
         )
 
-        # Step 6: build all final extrinsics
         extrinsics_new = []
         for i in range(extrinsic.shape[1]):
             M_vggt = torch.eye(4, device=self.device)
@@ -439,8 +385,6 @@ class Omega_CameraPoseFinder:
         target_extrinsic = extrinsics_new[target_index]
         target_intrinsic = intrinsic[0, target_index]
 
-        # debug renders
-        os.makedirs("./temp_views2", exist_ok=True)
         for i in range(len(all_image_paths)):
             rendered_image = self.mesh_renderer.render(
                 image_size=self.original_image_size,
@@ -448,66 +392,16 @@ class Omega_CameraPoseFinder:
                 T=extrinsics_new[i][0:3, 3].cpu().numpy(),
             )
             rendered_image = rendered_image[0, ..., :3].cpu().numpy()
-            plt.imsave(f"temp_views2/{img_name}_{i}.png", rendered_image)
-
-        self._unload_vggt()
+            plt.imsave(
+                os.path.join(self.debug_view_path, f"{img_name}_{i}.png"),
+                rendered_image,
+            )
 
         return target_extrinsic, target_intrinsic
 
 
-# ── Factory function ──────────────────────────────────────────────────────────
-
-def create_pose_finder(
-    mesh_pth: str,
-    image_size,
-    device,
-    backend: Literal["hanyuan", "trellis"] = "hanyuan",
-    dist: float = 3.0,
-    fov: float = 40,
-    checkpoint_path: str = "/workspace/checkpoints/checkpoints_vggt-omega/vggt_omega_1b_512.pt",
-    model_image_resolution: int = 512,
-    enable_alignment: bool = False,
-) -> Omega_CameraPoseFinder:
-    """
-    Create an Omega_CameraPoseFinder instance.
-
-    Args:
-        mesh_pth: Path to the .glb mesh file.
-        image_size: Render resolution — int or (H, W) tuple.
-        device: "cuda" or "cpu".
-        backend: Renderer backend:
-                 - "hanyuan": Hunyuan3D + PyTorch3D
-                 - "trellis": TRELLIS.2 + PyTorch3D
-        dist: Default camera distance from origin.
-        fov: Field of view in degrees.
-        checkpoint_path: Path to VGGT-Omega .pt checkpoint file.
-        model_image_resolution: Image resolution fed to VGGT-Omega.
-        enable_alignment: Enable VGGT-Omega alignment module.
-
-    Returns:
-        Omega_CameraPoseFinder instance.
-
-    Example::
-
-        finder = create_pose_finder(
-            mesh_pth="mesh.glb",
-            image_size=512,
-            device="cuda",
-            backend="hanyuan",
-            checkpoint_path="./checkpoints/vggt-omega/vggt_omega_1b_512.pt",
-        )
-    """
-    return Omega_CameraPoseFinder(
-        mesh_pth=mesh_pth,
-        image_size=image_size,
-        device=device,
-        dist=dist,
-        fov=fov,
-        checkpoint_path=checkpoint_path,
-        model_image_resolution=model_image_resolution,
-        enable_alignment=enable_alignment,
-        backend=backend,
-    )
+# Backward-compatible alias
+CameraPoseFinder = Omega_CameraPoseFinder
 
 
 # ── Relative pose transfer ────────────────────────────────────────────────────
