@@ -75,7 +75,7 @@ class Omega_CameraPoseFinder:
 
     Workflow:
       1. :meth:`set_mesh` — attach a .glb for rendering.
-      2. :meth:`generate_initial_views` — render known views at multiple radii.
+      2. :meth:`generate_initial_views` — render known views at ``self.dist``.
       3. :meth:`get_vggt_initial_guess` — estimate pose for a query image.
     """
 
@@ -94,8 +94,8 @@ class Omega_CameraPoseFinder:
             vggt_model: Pre-loaded VGGT-Omega model (from :func:`load_vggt_omega`).
             image_size: Render resolution — int or (H, W) tuple.
             device: "cuda" or "cpu".
-            output_dir: Directory for intermediate renders (temp_views, temp_views2).
-            dist: Default camera distance from origin.
+            output_dir: Directory for intermediate renders (temp_views).
+            dist: Camera distance from origin used for context views and pose output.
             fov: Field of view in degrees (informational).
             model_image_resolution: Resolution fed to VGGT-Omega (e.g. 512).
         """
@@ -111,21 +111,16 @@ class Omega_CameraPoseFinder:
 
         self.mesh_renderer = None
         self.known_image_paths = []
-        self.known_radii = []
 
         self.view_path = os.path.join(output_dir, "temp_views")
-        self.debug_view_path = os.path.join(output_dir, "temp_views2")
         os.makedirs(output_dir, exist_ok=True)
         shutil.rmtree(self.view_path, ignore_errors=True)
-        shutil.rmtree(self.debug_view_path, ignore_errors=True)
         os.makedirs(self.view_path, exist_ok=True)
-        os.makedirs(self.debug_view_path, exist_ok=True)
 
     def set_mesh(self, mesh_pth: str) -> None:
-        """Load (or swap to) the mesh used for view rendering and pose refinement."""
+        """Load (or swap to) the mesh used for view rendering and pose estimation."""
         self.mesh_renderer = Renderer(mesh_pth, self.device)
         self.known_image_paths = []
-        self.known_radii = []
 
     def _require_mesh_renderer(self) -> None:
         if self.mesh_renderer is None:
@@ -158,21 +153,14 @@ class Omega_CameraPoseFinder:
 
         return R, T
 
-    # ── Multi-radius view generation ──────────────────────────────────────────
+    # ── View generation ───────────────────────────────────────────────────────
 
-    def generate_initial_views(self, num_views, img_name, radii=None):
-        """
-        Generate known views at multiple radii so VGGT-Omega has visual context
-        at every plausible camera distance.
-        """
+    def generate_initial_views(self, num_views, img_name):
+        """Generate context views on a sphere at ``self.dist`` (reference logic)."""
         self._require_mesh_renderer()
 
-        if radii is None:
-            radii = [1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0]
-
-        print(f"Generating initial views across radii {radii} ...")
+        print(f"Generating {num_views} initial views for context ...")
         self.known_image_paths = []
-        self.known_radii = []
 
         azimuths = np.linspace(0, 360, int(np.sqrt(num_views * 2)), endpoint=False)
         elevations = np.linspace(-45, 45, int(np.sqrt(num_views / 2)), endpoint=True)
@@ -181,108 +169,35 @@ class Omega_CameraPoseFinder:
         all_Rs = []
         all_Ts = []
 
-        for radius in radii:
-            for azimuth in azimuths:
-                for elevation in elevations:
-                    r, t = self.get_opencv_camera_matrix(azimuth, elevation, radius)
-                    all_Rs.append(torch.from_numpy(r))
-                    all_Ts.append(torch.from_numpy(t))
+        for azimuth in azimuths:
+            for elevation in elevations:
+                r, t = self.get_opencv_camera_matrix(azimuth, elevation, self.dist)
+                all_Rs.append(torch.from_numpy(r))
+                all_Ts.append(torch.from_numpy(t))
 
-                    rendered_image = self.mesh_renderer.render(
-                        image_size=self.original_image_size, R=r, T=t
-                    )
-                    rendered_image = rendered_image[0, ..., :3].cpu().numpy()
+                rendered_image = self.mesh_renderer.render(
+                    image_size=self.original_image_size, R=r, T=t
+                )
+                rendered_image = rendered_image[0, ..., :3].cpu().numpy()
 
-                    path = os.path.join(self.view_path, f"{img_name}_{num_of_views}.png")
-                    plt.imsave(path, rendered_image)
-                    self.known_image_paths.append(path)
-                    self.known_radii.append(radius)
-                    num_of_views += 1
+                path = os.path.join(self.view_path, f"{img_name}_{num_of_views}.png")
+                plt.imsave(path, rendered_image)
+                self.known_image_paths.append(path)
+                num_of_views += 1
 
-        print(
-            f"Generated {num_of_views} views total "
-            f"({len(radii)} radii × azimuth × elevation)."
-        )
+        print(f"Generated {num_of_views} views.")
         return all_Rs, all_Ts
-
-    # ── VGGT-Omega depth helper ───────────────────────────────────────────────
-
-    def _get_omega_depth_estimate(self, predictions, target_index):
-        try:
-            depth_predictions = predictions["depth"]
-            target_depth_map = depth_predictions[0, target_index]
-
-            if target_depth_map.ndim == 3:
-                target_depth_map = target_depth_map[..., 0]
-
-            valid_depths = target_depth_map[target_depth_map > 0]
-            if valid_depths.numel() == 0:
-                print("VGGT-Omega depth map is empty — skipping.")
-                return None
-
-            estimate = valid_depths.median().item()
-            print(f"VGGT-Omega depth estimate: {estimate:.3f}")
-            return estimate
-
-        except Exception as e:
-            print(f"VGGT-Omega depth unavailable ({e}) — skipping.")
-            return None
-
-    # ── Render-and-compare helper ─────────────────────────────────────────────
-
-    def _render_and_compare(self, target_img_np, R_np, dist):
-        forward = -R_np[2, :]
-        cam_pos_at_dist = forward * (-dist)
-        T_new = -R_np @ cam_pos_at_dist.reshape(3, 1)
-
-        rendered = self.mesh_renderer.render(
-            image_size=self.original_image_size, R=R_np, T=T_new
-        )
-        rendered_np = rendered[0, ..., :3].cpu().numpy()
-
-        h, w = rendered_np.shape[:2]
-        if target_img_np.shape[:2] != (h, w):
-            from PIL import Image as PILImage
-            target_resized = np.array(
-                PILImage.fromarray((target_img_np * 255).astype(np.uint8)).resize((w, h))
-            ) / 255.0
-        else:
-            target_resized = target_img_np
-
-        return np.mean((rendered_np - target_resized) ** 2)
-
-    # ── Binary search for best distance ──────────────────────────────────────
-
-    def _binary_search_distance(self, target_img_np, R_np, low, high, iters=6):
-        print(f"Binary search for distance in [{low:.2f}, {high:.2f}]")
-
-        for i in range(iters):
-            mid = (low + high) / 2.0
-            delta = (high - low) * 0.1
-
-            score_left = self._render_and_compare(target_img_np, R_np, mid - delta)
-            score_right = self._render_and_compare(target_img_np, R_np, mid + delta)
-
-            if score_left < score_right:
-                high = mid
-            else:
-                low = mid
-
-            print(
-                f"  iter {i + 1}: range=[{low:.3f}, {high:.3f}]  "
-                f"score_left={score_left:.4f}  score_right={score_right:.4f}"
-            )
-
-        best = (low + high) / 2.0
-        print(f"Binary search result: {best:.3f}")
-        return best
 
     # ── Main pose estimation ──────────────────────────────────────────────────
 
     def get_vggt_initial_guess(self, target_image_path, all_Rs, all_Ts, img_name):
         """
-        Estimate the camera pose for target_image_path given pre-rendered
-        known views stored in self.known_image_paths / self.known_radii.
+        Estimate the camera pose for *target_image_path* given pre-rendered
+        known views in ``self.known_image_paths``.
+
+        Aligns VGGT-Omega output to the renderer frame via ``all_Rs[0]`` and
+        assigns a fixed translation ``[0, 0, self.dist]`` to every view, matching
+        the reference CameraPoseFinder logic.
         """
         self._require_mesh_renderer()
 
@@ -311,55 +226,9 @@ class Omega_CameraPoseFinder:
                 predictions["images"].shape[-2:],
             )
 
-            omega_depth_estimate = self._get_omega_depth_estimate(predictions, target_index)
-
-        target_pose = extrinsic[0][target_index]
-        best_known_idx = None
-        best_similarity = float("inf")
-
-        for i in range(len(self.known_image_paths)):
-            known_pose = extrinsic[0][i]
-            diff = torch.norm(target_pose[:, :3] - known_pose[:, :3]).item()
-            if diff < best_similarity:
-                best_similarity = diff
-                best_known_idx = i
-
-        sampling_radius = self.known_radii[best_known_idx]
-        print(
-            f"Closest known view radius: {sampling_radius:.2f}  "
-            f"(pose diff={best_similarity:.4f})"
-        )
-
-        if omega_depth_estimate is not None:
-            initial_dist_estimate = 0.6 * sampling_radius + 0.4 * omega_depth_estimate
-            search_margin = 0.8
-        else:
-            initial_dist_estimate = sampling_radius
-            search_margin = 1.2
-
-        search_low = max(0.5, initial_dist_estimate - search_margin)
-        search_high = initial_dist_estimate + search_margin
-        print(
-            f"Initial distance estimate: {initial_dist_estimate:.3f}  "
-            f"search range: [{search_low:.2f}, {search_high:.2f}]"
-        )
-
         R_reference = all_Rs[0]
         M_reference = torch.eye(4, device=self.device)
         M_reference[0:3, :3] = R_reference
-
-        M_vggt_target = torch.eye(4, device=self.device)
-        M_vggt_target[0:3, :] = extrinsic[0][target_index]
-        M_aligned_target = torch.matmul(M_vggt_target, M_reference)
-        R_target_np = M_aligned_target[0:3, :3].cpu().numpy()
-
-        target_img_np = np.array(
-            Image.open(target_image_path).convert("RGB").resize(self.original_image_size)
-        ) / 255.0
-
-        best_dist = self._binary_search_distance(
-            target_img_np, R_target_np, search_low, search_high, iters=6
-        )
 
         extrinsics_new = []
         for i in range(extrinsic.shape[1]):
@@ -367,16 +236,9 @@ class Omega_CameraPoseFinder:
             M_vggt[0:3, :] = extrinsic[0][i]
 
             M_aligned = torch.matmul(M_vggt, M_reference)
-
-            if i == target_index:
-                M_aligned[0:3, 3] = torch.tensor(
-                    [0, 0, best_dist], dtype=torch.float32, device=self.device
-                )
-            else:
-                radius_i = self.known_radii[i] if i < len(self.known_radii) else self.dist
-                M_aligned[0:3, 3] = torch.tensor(
-                    [0, 0, radius_i], dtype=torch.float32, device=self.device
-                )
+            M_aligned[0:3, 3] = torch.tensor(
+                [0, 0, self.dist], dtype=torch.float32, device=self.device
+            )
 
             extrinsics_new.append(M_aligned)
 
@@ -384,18 +246,6 @@ class Omega_CameraPoseFinder:
 
         target_extrinsic = extrinsics_new[target_index]
         target_intrinsic = intrinsic[0, target_index]
-
-        for i in range(len(all_image_paths)):
-            rendered_image = self.mesh_renderer.render(
-                image_size=self.original_image_size,
-                R=extrinsics_new[i][0:3, :3].cpu().numpy(),
-                T=extrinsics_new[i][0:3, 3].cpu().numpy(),
-            )
-            rendered_image = rendered_image[0, ..., :3].cpu().numpy()
-            plt.imsave(
-                os.path.join(self.debug_view_path, f"{img_name}_{i}.png"),
-                rendered_image,
-            )
 
         return target_extrinsic, target_intrinsic
 
@@ -408,15 +258,15 @@ CameraPoseFinder = Omega_CameraPoseFinder
 
 def compute_new_pose_from_relative(view_matrix_B_with_pose_A, view_matrix_B, view_matrix_B_prime):
     """
-    Transfer a relative rotation from one object to another.
+    Transfer a relative camera transform from object B onto B′.
 
     Given:
-        V_B_with_pose_A  — camera pose used to photograph horse B from angle A
-        V_B              — camera pose used to photograph horse B from its reference angle
-        V_B_prime        — camera pose used to photograph the jumping horse
+        V_B_with_pose_A  — camera pose for B photographed from pose A
+        V_B              — camera pose for the canonical B reference photo
+        V_B_prime        — camera pose for the B′ reference photo
 
     Returns:
-        V_B_prime_new    — camera pose to render the jumping horse from angle B
+        V_B_prime_new    — camera pose to render B′ after applying (B ref ← pose A)
     """
     V_B_with_pose_A = view_matrix_B_with_pose_A.cpu().numpy()
     V_B = view_matrix_B.cpu().numpy()
