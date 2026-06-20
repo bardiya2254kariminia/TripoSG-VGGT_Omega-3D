@@ -108,3 +108,19 @@ dependencies:
       #   Checkpoints:  RealESRGAN_x2plus.pth  (auto-downloaded)
       #                 big-lama.pt             (auto-downloaded)
       # cvcuda_cu12     installed by final_setup.sh (CUDA version must match)
+      #
+      # ── VGGT family (camera pose estimation backbone) ─────────────────────────
+      # VGGT (base)         git clone → pip install --no-deps -e vggt-repo/
+      #   Repo:       https://github.com/facebookresearch/vggt
+      #   Package:    vggt  (installs via pyproject.toml; has vggt.models.vggt.VGGT)
+      #   Checkpoint: facebook/VGGT-1B → checkpoints/vggt-1b/model.pt
+      #               (non-commercial; swap to facebook/VGGT-1B-Commercial for
+      #                commercial use — gated, request access via HF form)
+      #   Note:       installed --no-deps to keep numpy==2.x; VGGT's numpy<2
+      #               constraint is conservative and the library works with 2.x.
+      #
+      # VGGT-Omega          git clone → pip install -e vggt-omega/
+      #   Repo:       https://github.com/facebookresearch/vggt-omega
+      #   Package:    vggt_omega  (installs via pyproject.toml)
+      #   Checkpoint: facebook/VGGT-Omega → checkpoints/vggt-omega/vggt_omega_1b_512.pt
+      #               (gated — run 'huggingface-cli login' after access approval)

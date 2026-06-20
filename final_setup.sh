@@ -38,6 +38,8 @@ ENV_YML="${SCRIPT_DIR}/final_env.yml"
 CONDA_ENV="hanyuan"
 CONDA_BIN="/opt/miniforge3/bin/conda"
 HY3DGEN_SRC="${SCRIPT_DIR}/src/hy3dgen"
+VGGT_DIR="vggt-repo"
+VGGT_REPO="https://github.com/facebookresearch/vggt.git"
 VGGT_OMEGA_DIR="vggt-omega"
 VGGT_OMEGA_REPO="https://github.com/facebookresearch/vggt-omega.git"
 # ── init conda in this shell ──────────────────────────────────────────────────
@@ -142,7 +144,7 @@ pip install -e .
 cd "${SCRIPT_DIR}"
 info "VGGT-Omega (vggt_omega) setup complete."
 
-section "7. Downloading VGGT-Omega checkpoint"
+section "10a. Downloading VGGT-Omega checkpoint"
 CKPT_DIR="${SCRIPT_DIR}/checkpoints/vggt-omega"
 CKPT_FILE="${CKPT_DIR}/vggt_omega_1b_512.pt"
 mkdir -p "${CKPT_DIR}"
@@ -169,6 +171,75 @@ else
         warn "Checkpoint download failed (gated repo / not logged in)."
         warn "Run 'huggingface-cli login' after requesting access, then:"
         warn "  hf download facebook/VGGT-Omega vggt_omega_1b_512.pt --local-dir ${CKPT_DIR}"
+    fi
+fi
+# =============================================================================
+section "10b. Installing VGGT (Visual Geometry Grounded Transformer)"
+# =============================================================================
+# VGGT: feed-forward 3D scene reconstruction (cameras, depth, point maps).
+# Repo:  https://github.com/facebookresearch/vggt
+# Paper: CVPR 2025 Best Paper
+#
+# Has a pyproject.toml → installs as a proper package.
+# Installed with --no-deps to avoid the numpy<2 constraint conflicting with
+# the numpy==2.x already in this env (VGGT is compatible with numpy 2.x in
+# practice; the pin is conservative).
+
+cd "${SCRIPT_DIR}"
+if [ ! -d "${VGGT_DIR}/.git" ]; then
+    info "Cloning VGGT → ${VGGT_DIR} ..."
+    git clone "${VGGT_REPO}" "${VGGT_DIR}"
+    info "Clone complete."
+else
+    info "VGGT already cloned at ${VGGT_DIR} — skipping."
+fi
+
+info "Installing VGGT package (editable, --no-deps to preserve numpy 2.x) ..."
+pip install --no-build-isolation --no-deps -e "${SCRIPT_DIR}/${VGGT_DIR}"
+
+python -c "
+from vggt.models.vggt import VGGT
+from vggt.utils.load_fn import load_and_preprocess_images
+print('  vggt OK')
+" || warn "vggt import check failed — verify the install at ${SCRIPT_DIR}/${VGGT_DIR}."
+
+info "VGGT package installed."
+
+# =============================================================================
+section "10c. Downloading VGGT checkpoint"
+# =============================================================================
+# Two checkpoints available on HuggingFace:
+#   facebook/VGGT-1B            — research / non-commercial licence
+#   facebook/VGGT-1B-Commercial — commercial licence (gated, requires form)
+# We download the public one by default; swap the repo ID below for commercial.
+
+VGGT_CKPT_REPO="${VGGT_CKPT_REPO:-facebook/VGGT-1B}"
+VGGT_CKPT_DIR="${SCRIPT_DIR}/checkpoints/vggt-1b"
+VGGT_CKPT_FILE="${VGGT_CKPT_DIR}/model.pt"
+mkdir -p "${VGGT_CKPT_DIR}"
+
+if [ -f "${VGGT_CKPT_FILE}" ]; then
+    info "VGGT checkpoint already present — ${VGGT_CKPT_FILE}"
+else
+    info "Downloading VGGT model.pt from ${VGGT_CKPT_REPO} ..."
+    if command -v hf >/dev/null 2>&1; then
+        HF_DL=(hf download)
+    elif command -v huggingface-cli >/dev/null 2>&1; then
+        HF_DL=(huggingface-cli download)
+    else
+        HF_DL=(python -m huggingface_hub.cli download)
+    fi
+    if "${HF_DL[@]}" "${VGGT_CKPT_REPO}" model.pt \
+            --local-dir "${VGGT_CKPT_DIR}"; then
+        info "VGGT checkpoint → ${VGGT_CKPT_FILE}"
+    else
+        warn "VGGT checkpoint download failed."
+        warn "The model can also auto-download at runtime via:"
+        warn "  VGGT.from_pretrained('${VGGT_CKPT_REPO}')"
+        warn "Or download manually:"
+        warn "  hf download ${VGGT_CKPT_REPO} model.pt --local-dir ${VGGT_CKPT_DIR}"
+        warn "For commercial use, request access to facebook/VGGT-1B-Commercial then:"
+        warn "  set VGGT_CKPT_REPO=facebook/VGGT-1B-Commercial and rerun section 10c."
     fi
 fi
 # =============================================================================
@@ -354,6 +425,19 @@ except Exception as e:
 
 import pytorch3d
 print(f'  pytorch3d {pytorch3d.__version__} OK')
+
+try:
+    from vggt.models.vggt import VGGT
+    from vggt.utils.load_fn import load_and_preprocess_images
+    print(f'  vggt (VGGT model) OK')
+except Exception as e:
+    print(f'  vggt FAIL: {e}')
+
+try:
+    import vggt_omega
+    print(f'  vggt_omega OK')
+except Exception as e:
+    print(f'  vggt_omega FAIL: {e}')
 
 try:
     from triposg.pipelines.pipeline_triposg import TripoSGPipeline
