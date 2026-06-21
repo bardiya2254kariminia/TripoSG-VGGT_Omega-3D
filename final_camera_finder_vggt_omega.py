@@ -144,7 +144,7 @@ class HunyuanRenderer():
             in_ndc=False
         )
 
-    def render(self, image_size, R, T, K=None, focal_length=None, principal_point=None, blur_radius=0.0, location=[[0.0, 0.0, -3.0]]):
+    def render(self, image_size, R, T, K=None, focal_length=None, principal_point=None, blur_radius=0.0):
         if isinstance(image_size, (list, tuple)):
             self.image_size = image_size
         else:
@@ -173,6 +173,14 @@ class HunyuanRenderer():
         if T.dim() in [1, 2]:
             T = T.unsqueeze(0)
 
+        # Compute camera world position from OpenCV R,T: cam_pos = -R^T @ T
+        R_sq = R[0]  # (3, 3)
+        T_sq = T[0].reshape(3)
+        cam_pos = -R_sq.T @ T_sq
+        
+        # Fixed light position in world space: right side of the object
+        light_pos = [3.0, 0.0, 3.0]
+
         R_pytorch3d, T_pytorch3d = self.get_R_T_pytorch(R, T)
 
         cameras = self.get_pytorch3d_camera(
@@ -190,7 +198,7 @@ class HunyuanRenderer():
             cameras=cameras, raster_settings=raster_settings)
         
         lights = PointLights(
-            device=self.device, location=[[0.0, 0.0, -3.0]])
+            device=self.device, location=[light_pos])
         
         shader = SoftPhongShader(device=self.device, cameras=cameras, lights=lights,
                                         blend_params=BlendParams(background_color=(1.0, 1.0, 1.0)))

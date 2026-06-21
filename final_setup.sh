@@ -7,7 +7,7 @@
 #
 # What it does (in order):
 #   1.  Creates the "hanyuan" conda env from final_env.yml
-#   2.  Installs PyTorch 2.3.1 (cu121 wheels — compatible with driver 12.6)
+#   2.  Installs PyTorch 2.5.1 (cu121 wheels — torch>=2.4 needed for RMSNorm / Flux2Klein)
 #   3.  Installs BEN2 at pinned commit
 #   4.  Installs hy3dgen from the already-cloned local source (editable)
 #   5.  Compiles & installs PyTorch3D (CUDA, --no-build-isolation)
@@ -58,12 +58,14 @@ fi
 conda activate "${CONDA_ENV}"
 
 # =============================================================================
-section "2. Installing PyTorch 2.3.1 + cu121 wheels"
+section "2. Installing PyTorch 2.5.1 + cu121 wheels"
 # =============================================================================
+# torch>=2.4 required for torch.nn.RMSNorm (used by Flux2KleinPipeline).
+# 2.5.1 is the latest stable cu121 wheel available.
 pip install \
-    torch==2.3.1 \
-    torchvision==0.18.1 \
-    torchaudio==2.3.1 \
+    torch==2.5.1 \
+    torchvision==0.20.1 \
+    torchaudio==2.5.1 \
     --index-url https://download.pytorch.org/whl/cu121
 pip install peft jaxtyping typeguard
 
