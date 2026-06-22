@@ -6,6 +6,11 @@ Pipeline per image:
   2. Generate base 3D mesh with mesh backbone → <stem>_mesh.glb
   3. Texturize (optional)                     → <stem>_mesh_textured.glb
 
+Supports processing a single image (--image) or an entire directory (--input_dir).
+When --input_dir is used all images are processed in one Python process so that
+heavy models (BEN2 / TripoSG / MVAdapter) are loaded only once, dramatically
+reducing total wall-clock time when more than one image is present.
+
 Mesh backbones (--mesh_backbone):
   triposg  (default) — TripoSGMeshBackbone generates watertight mesh geometry
                        in one forward pass from the image.
@@ -26,8 +31,11 @@ Uses:
   TripoSG  (github.com/VAST-AI-Research/TripoSG)
 
 Usage:
-    # Default: TripoSG mesh → MVAdapter texturing
+    # Single image (original mode):
     python mesh/inference.py --image path/to/image.png
+
+    # Whole directory (batch mode — loads models once for all images):
+    python mesh/inference.py --input_dir path/to/images/ --output_dir path/to/out/
 
     # Hunyuan mesh → Hunyuan paint texturing:
     python mesh/inference.py --image photo.png --mesh_backbone hunyuan --texture_backend hunyuan
@@ -42,7 +50,7 @@ Usage:
     python mesh/inference.py --image photo.png --mvadapter_variant sd21
 
 Optional flags:
-    --output_dir               DIR    Where to save outputs  (default: same dir as image)
+    --output_dir               DIR    Where to save outputs  (default: same dir as image / <input_dir>/../out)
     --no_bg_removal                   Skip BEN2; use original image as-is
     --mesh_backbone            STR    "triposg" (default) or "hunyuan"
     --texture_backend          STR    "mvadapter" (default), "hunyuan", or "none"
@@ -69,6 +77,21 @@ Optional flags:
 import argparse
 import os
 import sys
+
+# Cap OpenMP / BLAS thread counts before any native library is imported.
+# With many CPU cores the default "1 thread per core" lets libgomp exhaust
+# virtual-address space or the container thread limit while large tensors are
+# live, producing "Thread creation failed" → heap corruption → segfault.
+_THREAD_CAP = str(int(os.environ.get("OMP_NUM_THREADS", "4")))
+for _var in (
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+):
+    os.environ.setdefault(_var, _THREAD_CAP)
+
 import torch
 from PIL import Image
 
@@ -128,18 +151,30 @@ def remove_background(image_path: str, output_path: str) -> str:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Generate a textured .glb mesh from a single image.\n"
+            "Generate a textured .glb mesh from a single image or a whole directory.\n"
             "Default: TripoSG mesh backbone → MV-Adapter texturing."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument(
-        "--image", required=True,
-        help="Path to the input image (PNG / JPG).",
+    img_group = parser.add_mutually_exclusive_group(required=True)
+    img_group.add_argument(
+        "--image",
+        help="Path to a single input image (PNG / JPG).",
+    )
+    img_group.add_argument(
+        "--input_dir",
+        help=(
+            "Directory of input images. All image files inside are processed in one "
+            "Python process so models are loaded only once (much faster than calling "
+            "--image N times)."
+        ),
     )
     parser.add_argument(
         "--output_dir", default=None,
-        help="Directory for output files. Defaults to the same directory as --image.",
+        help=(
+            "Directory for output files. For --image defaults to the same directory as "
+            "the image; for --input_dir defaults to <input_dir>/../generated_meshes."
+        ),
     )
     parser.add_argument(
         "--no_bg_removal", action="store_true", default=False,
@@ -179,15 +214,15 @@ def parse_args() -> argparse.Namespace:
     # ── MVAdapter texturing options ───────────────────────────────────────────
     mvadapter_group = parser.add_argument_group("MVAdapter texturing options")
     mvadapter_group.add_argument(
-        "--mvadapter_variant", default="sd21", choices=["sdxl", "sd21"],
+        "--mvadapter_variant", default="sdxl", choices=["sdxl", "sd21"],
         help=(
-            "MVAdapter base model variant: 'sd21' (default, 512px, fast, <10GB VRAM) "
-            "or 'sdxl' (768px, higher quality, ~16GB VRAM)."
+            "MVAdapter base model variant: 'sdxl' (default, 768px, ~16GB VRAM) "
+            "or 'sd21' (512px, fast, <10GB VRAM)."
         ),
     )
     mvadapter_group.add_argument(
-        "--mvadapter_steps", type=int, default=25,
-        help="MVAdapter multi-view denoising steps (default: 25).",
+        "--mvadapter_steps", type=int, default=50,
+        help="MVAdapter multi-view denoising steps (default: 50).",
     )
     mvadapter_group.add_argument(
         "--mvadapter_guidance", type=float, default=3.0,
@@ -255,27 +290,99 @@ def parse_args() -> argparse.Namespace:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Per-image processing (shared model instances passed in)
+# ─────────────────────────────────────────────────────────────────────────────
+
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff", ".tif"}
+
+
+def process_image(
+    image_path: str,
+    output_dir: str,
+    args,
+    triposg=None,
+    hunyuan_flow=None,
+    hunyuan_paint=None,
+    mvadapter=None,
+) -> None:
+    """
+    Run the full pipeline for a single *image_path*.
+
+    Pre-loaded model objects (triposg / hunyuan_flow / hunyuan_paint / mvadapter)
+    are passed in so that callers can reuse them across images without reloading.
+    """
+    image_path = os.path.abspath(image_path)
+    os.makedirs(output_dir, exist_ok=True)
+
+    stem         = os.path.splitext(os.path.basename(image_path))[0]
+    no_bg_path   = os.path.join(output_dir, f"{stem}_no_bg.png")
+    bare_path    = os.path.join(output_dir, f"{stem}_mesh.glb")
+    painted_path = os.path.join(output_dir, f"{stem}_mesh_textured.glb")
+
+    print("\n[INFO] ─────────────────────────────────────────────────────────")
+    print(f"[INFO] Image         : {image_path}")
+    print(f"[INFO] Output dir    : {output_dir}")
+    print("[INFO] ─────────────────────────────────────────────────────────")
+
+    # ── step 1: background removal ────────────────────────────────────────────
+    if args.no_bg_removal:
+        mesh_input_path = image_path
+    else:
+        mesh_input_path = remove_background(image_path, no_bg_path)
+
+    # ── step 2: mesh backbone ─────────────────────────────────────────────────
+    if args.mesh_backbone == "triposg":
+        mesh = triposg.generate_from_path(mesh_input_path)
+        print(f"[MESH] Saving mesh → {bare_path}")
+        mesh.export(bare_path)
+
+    else:  # hunyuan
+        print("[MESH] Generating base mesh with Hunyuan3D-2 ...")
+        image = Image.open(mesh_input_path).convert("RGBA")
+        mesh = hunyuan_flow(image=image)[0]
+        print(f"[MESH] Saving mesh → {bare_path}")
+        mesh.export(bare_path)
+
+        if args.texture_backend == "hunyuan":
+            print("[TEXTURE] Painting mesh with Hunyuan3D paint pipeline ...")
+            painted_mesh = hunyuan_paint(mesh, image=image)
+            print(f"[TEXTURE] Saving textured mesh → {painted_path}")
+            painted_mesh.export(painted_path)
+
+    # ── step 3: MVAdapter texturing ───────────────────────────────────────────
+    if args.texture_backend == "mvadapter":
+        mv_save_name = f"{stem}_mesh_textured_mv"
+
+        shaded_path = mvadapter.texturize(
+            mesh_path=bare_path,
+            image=None if args.mvadapter_text else mesh_input_path,
+            text=args.mvadapter_text,
+            save_dir=output_dir,
+            save_name=mv_save_name,
+        )
+
+        if os.path.abspath(shaded_path) != os.path.abspath(painted_path):
+            import shutil
+            shutil.move(shaded_path, painted_path)
+            print(f"[TEXTURE] Textured mesh → {painted_path}")
+        else:
+            print(f"[TEXTURE] Textured mesh → {shaded_path}")
+
+    # ── summary ───────────────────────────────────────────────────────────────
+    print("\n[INFO] Done.")
+    if not args.no_bg_removal:
+        print(f"  bg-removed image : {no_bg_path}")
+    print(f"  mesh             : {bare_path}")
+    if args.texture_backend != "none":
+        print(f"  textured mesh    : {painted_path}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     args = parse_args()
-
-    image_path = os.path.abspath(args.image)
-    if not os.path.isfile(image_path):
-        sys.exit(f"[ERROR] Image not found: {image_path}")
-
-    # ── resolve output paths ──────────────────────────────────────────────────
-    if args.output_dir:
-        output_dir = os.path.abspath(args.output_dir)
-        os.makedirs(output_dir, exist_ok=True)
-    else:
-        output_dir = os.path.dirname(image_path)
-
-    stem          = os.path.splitext(os.path.basename(image_path))[0]
-    no_bg_path    = os.path.join(output_dir, f"{stem}_no_bg.png")
-    bare_path     = os.path.join(output_dir, f"{stem}_mesh.glb")
-    painted_path  = os.path.join(output_dir, f"{stem}_mesh_textured.glb")
 
     # ── validate backend combination ──────────────────────────────────────────
     if args.texture_backend == "hunyuan" and args.mesh_backbone != "hunyuan":
@@ -284,8 +391,34 @@ def main() -> None:
             f"       Current mesh_backbone='{args.mesh_backbone}'."
         )
 
+    # ── collect images to process ─────────────────────────────────────────────
+    if args.image:
+        image_path = os.path.abspath(args.image)
+        if not os.path.isfile(image_path):
+            sys.exit(f"[ERROR] Image not found: {image_path}")
+        images = [image_path]
+        if args.output_dir:
+            base_output_dir = os.path.abspath(args.output_dir)
+        else:
+            base_output_dir = None  # resolved per-image below
+    else:
+        input_dir = os.path.abspath(args.input_dir)
+        if not os.path.isdir(input_dir):
+            sys.exit(f"[ERROR] Input directory not found: {input_dir}")
+        images = sorted(
+            p for p in (
+                os.path.join(input_dir, f) for f in os.listdir(input_dir)
+            )
+            if os.path.isfile(p) and os.path.splitext(p)[1].lower() in IMAGE_EXTS
+        )
+        if not images:
+            sys.exit(f"[ERROR] No image files found in {input_dir}")
+        if args.output_dir:
+            base_output_dir = os.path.abspath(args.output_dir)
+        else:
+            base_output_dir = os.path.join(os.path.dirname(input_dir), "generated_meshes")
+
     # ── pretty-print run config ───────────────────────────────────────────────
-    mesh_label = args.mesh_backbone
     if args.texture_backend == "none":
         texture_label = "disabled"
     elif args.texture_backend == "mvadapter":
@@ -299,64 +432,40 @@ def main() -> None:
         texture_label = "hunyuan paint"
 
     print("[INFO] ─────────────────────────────────────────────────────────")
-    print(f"[INFO] Input image    : {image_path}")
-    print(f"[INFO] Output dir     : {output_dir}")
-    print(f"[INFO] BG removal     : {'disabled' if args.no_bg_removal else 'BEN2'}")
-    print(f"[INFO] Mesh backbone  : {mesh_label}")
-    print(f"[INFO] Texture        : {texture_label}")
+    print(f"[INFO] Images to process : {len(images)}")
+    print(f"[INFO] BG removal        : {'disabled' if args.no_bg_removal else 'BEN2'}")
+    print(f"[INFO] Mesh backbone     : {args.mesh_backbone}")
+    print(f"[INFO] Texture           : {texture_label}")
     print("[INFO] ─────────────────────────────────────────────────────────")
 
-    # ── step 1: background removal ────────────────────────────────────────────
-    if args.no_bg_removal:
-        mesh_input_path = image_path
-    else:
-        mesh_input_path = remove_background(image_path, no_bg_path)
+    # ── load heavy models once ────────────────────────────────────────────────
+    triposg = None
+    hunyuan_flow = None
+    hunyuan_paint = None
+    mvadapter = None
 
-    # ── step 2: generate mesh with chosen backbone ────────────────────────────
     if args.mesh_backbone == "triposg":
-        print("[MESH] Generating mesh with TripoSG backbone ...")
+        print("[MESH] Loading TripoSG backbone (once for all images) ...")
         triposg = TripoSGMeshBackbone(
             model_path=args.triposg_model_path,
             num_inference_steps=args.triposg_steps,
             guidance_scale=args.triposg_guidance,
             seed=args.triposg_seed,
         )
-        mesh = triposg.generate_from_path(mesh_input_path)
-        print(f"[MESH] Saving mesh → {bare_path}")
-        mesh.export(bare_path)
-        triposg.unload()
-
-    else:  # hunyuan
+        triposg.load()
+    else:
         from hy3dgen.shapegen import Hunyuan3DDiTFlowMatchingPipeline
-
         print(f"[MESH] Loading Hunyuan3D-2 shape pipeline ({args.hunyuan_model}) ...")
-        pipeline_flow = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(args.hunyuan_model)
-
-        # Also load paint pipeline if needed
-        pipeline_paint = None
+        hunyuan_flow = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(args.hunyuan_model)
         if args.texture_backend == "hunyuan":
             from hy3dgen.texgen import Hunyuan3DPaintPipeline
             print("[TEXTURE] Loading Hunyuan3D paint pipeline ...")
-            pipeline_paint = Hunyuan3DPaintPipeline.from_pretrained(
+            hunyuan_paint = Hunyuan3DPaintPipeline.from_pretrained(
                 args.hunyuan_model, subfolder="hunyuan3d-paint-v2-0"
             )
 
-        print("[MESH] Generating base mesh with Hunyuan3D-2 ...")
-        image = Image.open(mesh_input_path).convert("RGBA")
-        mesh = pipeline_flow(image=image)[0]
-        print(f"[MESH] Saving mesh → {bare_path}")
-        mesh.export(bare_path)
-
-        # If Hunyuan paint texturing is requested, do it now
-        if args.texture_backend == "hunyuan":
-            print("[TEXTURE] Painting mesh with Hunyuan3D paint pipeline ...")
-            painted_mesh = pipeline_paint(mesh, image=image)
-            print(f"[TEXTURE] Saving textured mesh → {painted_path}")
-            painted_mesh.export(painted_path)
-
-    # ── step 3: texturize with MVAdapter (if requested) ───────────────────────
     if args.texture_backend == "mvadapter":
-        print("[TEXTURE] Texturizing with MV-Adapter ...")
+        print("[TEXTURE] Loading MVAdapter texturizer (once for all images) ...")
         mvadapter = MVAdapterTexturizer(
             variant=args.mvadapter_variant,
             num_inference_steps=args.mvadapter_steps,
@@ -368,34 +477,36 @@ def main() -> None:
             sd21_base_model=args.mvadapter_sd21_base_model,
         )
 
-        mv_save_dir  = output_dir
-        mv_save_name = f"{stem}_mesh_textured_mv"
-
-        shaded_path = mvadapter.texturize(
-            mesh_path=bare_path,
-            image=None if args.mvadapter_text else mesh_input_path,
-            text=args.mvadapter_text,
-            save_dir=mv_save_dir,
-            save_name=mv_save_name,
-        )
-
-        # Move to canonical output path if different
-        if os.path.abspath(shaded_path) != os.path.abspath(painted_path):
-            import shutil
-            shutil.move(shaded_path, painted_path)
-            print(f"[TEXTURE] Textured mesh → {painted_path}")
+    # ── process images ────────────────────────────────────────────────────────
+    for image_path in images:
+        stem = os.path.splitext(os.path.basename(image_path))[0]
+        if base_output_dir is not None:
+            out_dir = os.path.join(base_output_dir, stem)
         else:
-            print(f"[TEXTURE] Textured mesh → {shaded_path}")
+            out_dir = os.path.dirname(image_path)
 
+        try:
+            process_image(
+                image_path=image_path,
+                output_dir=out_dir,
+                args=args,
+                triposg=triposg,
+                hunyuan_flow=hunyuan_flow,
+                hunyuan_paint=hunyuan_paint,
+                mvadapter=mvadapter,
+            )
+        except Exception as exc:
+            print(f"[ERROR] Failed on {image_path}: {exc}", file=sys.stderr)
+            import traceback
+            traceback.print_exc()
+
+    # ── clean up ──────────────────────────────────────────────────────────────
+    if triposg is not None:
+        triposg.unload()
+    if mvadapter is not None:
         mvadapter.unload()
 
-    # ── summary ───────────────────────────────────────────────────────────────
-    print("\n[INFO] Done.")
-    if not args.no_bg_removal:
-        print(f"  bg-removed image : {no_bg_path}")
-    print(f"  mesh             : {bare_path}")
-    if args.texture_backend != "none":
-        print(f"  textured mesh    : {painted_path}")
+    print(f"\n[INFO] All {len(images)} image(s) processed.")
 
 
 if __name__ == "__main__":

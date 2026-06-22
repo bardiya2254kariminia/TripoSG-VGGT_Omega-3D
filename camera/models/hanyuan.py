@@ -733,6 +733,11 @@ class MVAdapterTexturizer:
             uv_size=uv_size,
             rgb_path=mv_path,
             rgb_process_config=ModProcessConfig(view_upscale=True, inpaint_mode="view"),
+            # Must match the official texture_i2tex.py convention: pass angles with -90
+            # already applied.  TexturePipeline applies another -90 internally AND loads
+            # the mesh with front_x_to_y=True (90° rotation).  The double -90 offsets
+            # the camera azimuths to compensate for that mesh rotation, so each view
+            # lands on exactly the same mesh face it was generated from.
             camera_azimuth_deg=[x - 90 for x in [0, 90, 180, 270, 180, 180]],
         )
         shaded_path = out.shaded_model_save_path
@@ -814,6 +819,11 @@ class MVAdapterTexturizer:
             uv_size=uv_size,
             rgb_path=mv_path,
             rgb_process_config=ModProcessConfig(view_upscale=True, inpaint_mode="view"),
+            # Must match the official texture_t2tex.py convention: pass angles with -90
+            # already applied.  TexturePipeline applies another -90 internally AND loads
+            # the mesh with front_x_to_y=True (90° rotation).  The double -90 offsets
+            # the camera azimuths to compensate for that mesh rotation, so each view
+            # lands on exactly the same mesh face it was generated from.
             camera_azimuth_deg=[x - 90 for x in [0, 90, 180, 270, 180, 180]],
         )
         shaded_path = out.shaded_model_save_path

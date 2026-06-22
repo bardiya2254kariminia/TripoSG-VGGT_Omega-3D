@@ -67,6 +67,8 @@ INPUT_DIR="${INPUT_DIR:-${REPO_ROOT}/images}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/mesh/generated_meshes}"
 MESH_BACKBONE="${MESH_BACKBONE:-triposg}"
 TEXTURE_BACKEND="${TEXTURE_BACKEND:-mvadapter}"
+# MESH_BACKBONE="${MESH_BACKBONE:-hunyuan}"
+# TEXTURE_BACKEND="${TEXTURE_BACKEND:-hunyuan}"
 NO_BG_REMOVAL="${NO_BG_REMOVAL:-0}"
 
 # Hunyuan mesh backbone
@@ -79,8 +81,8 @@ TRIPOSG_GUIDANCE="${TRIPOSG_GUIDANCE:-7.5}"
 TRIPOSG_SEED="${TRIPOSG_SEED:-42}"
 
 # MV-Adapter texturing
-MVADAPTER_VARIANT="${MVADAPTER_VARIANT:-sd21}"
-MVADAPTER_STEPS="${MVADAPTER_STEPS:-25}"
+MVADAPTER_VARIANT="${MVADAPTER_VARIANT:-sdxl}"
+MVADAPTER_STEPS="${MVADAPTER_STEPS:-50}"
 MVADAPTER_GUIDANCE="${MVADAPTER_GUIDANCE:-3.0}"
 MVADAPTER_SEED="${MVADAPTER_SEED:--1}"
 MVADAPTER_TEXT="${MVADAPTER_TEXT:-}"
@@ -183,24 +185,33 @@ fi
 # Common flags
 [ "${NO_BG_REMOVAL}" = "1" ] && COMMON_ARGS+=(--no_bg_removal)
 
-# ── process images ────────────────────────────────────────────────────────────
-for img in "${images[@]}"; do
-    [ -f "${img}" ] || continue
-    name="$(basename "${img}")"
-    name="${name%.*}"
-    img_output_dir="${OUTPUT_DIR}/${name}"
+# ── cap OpenMP / BLAS thread counts ──────────────────────────────────────────
+# With many CPU cores the default "one thread per core" causes libgomp to spawn
+# dozens of threads at once.  Each thread needs its own stack; when the process
+# is also holding large GPU/CPU tensors this exhausts virtual-address space or
+# hits the container's thread limit, giving:
+#   "libgomp: Thread creation failed: Resource temporarily unavailable"
+# followed by heap corruption and a segfault.  Capping to a small fixed count
+# is safe for GPU-bound inference and eliminates the crash.
+THREAD_CAP="${OMP_NUM_THREADS:-4}"
+export OMP_NUM_THREADS="${THREAD_CAP}"
+export MKL_NUM_THREADS="${THREAD_CAP}"
+export OPENBLAS_NUM_THREADS="${THREAD_CAP}"
+export NUMEXPR_NUM_THREADS="${THREAD_CAP}"
+export VECLIB_MAXIMUM_THREADS="${THREAD_CAP}"
 
-    echo ""
-    echo "[INFO] ── Processing: ${img}"
-    echo "[INFO]    Output dir: ${img_output_dir}"
+# ── process all images in one Python process (models loaded once) ─────────────
+# inference.py --input_dir processes every image in INPUT_DIR sequentially
+# while keeping BEN2 / TripoSG / MVAdapter loaded in VRAM between images.
+# This is significantly faster than the old per-image subprocess loop when
+# more than one image is present.
+echo ""
+echo "[INFO] ── Launching batch inference (models loaded once for all images)"
 
-    PYOPENGL_PLATFORM=egl python -u mesh/inference.py \
-        --image        "${img}" \
-        --output_dir   "${img_output_dir}" \
-        "${COMMON_ARGS[@]}"
-
-    echo "[INFO] ── Done: ${name}"
-done
+PYOPENGL_PLATFORM=egl python -u mesh/inference.py \
+    --input_dir  "${INPUT_DIR}" \
+    --output_dir "${OUTPUT_DIR}" \
+    "${COMMON_ARGS[@]}"
 
 echo ""
 echo "[INFO] All images processed.  Results in: ${OUTPUT_DIR}"
