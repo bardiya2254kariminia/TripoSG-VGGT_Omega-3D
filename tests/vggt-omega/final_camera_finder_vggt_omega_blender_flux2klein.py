@@ -358,26 +358,30 @@ FLUX2KLEIN_MODEL_ID = "black-forest-labs/FLUX.2-klein-9B"
 
 class ViewAngle(Enum):
     """Exactly 16 canonical views used for mesh rendering and Flux2Klein input."""
-    AZ000_EL_NEG20 = (0,   0)
-    AZ090_EL_NEG20 = (90,  0)
-    AZ180_EL_NEG20 = (180, 0)
-    AZ270_EL_NEG20 = (270, 0)
-    # AZ000_EL_NEG20 = (0,   -20)
-    # AZ045_EL_NEG20 = (45,  -20)
-    # AZ090_EL_NEG20 = (90,  -20)
-    # AZ135_EL_NEG20 = (135, -20)
-    # AZ180_EL_NEG20 = (180, -20)
-    # AZ225_EL_NEG20 = (225, -20)
-    # AZ270_EL_NEG20 = (270, -20)
-    # AZ315_EL_NEG20 = (315, -20)
-    # AZ000_EL_POS20 = (0,   20)
-    # AZ045_EL_POS20 = (45,  20)
-    # AZ090_EL_POS20 = (90,  20)
-    # AZ135_EL_POS20 = (135, 20)
-    # AZ180_EL_POS20 = (180, 20)
-    # AZ225_EL_POS20 = (225, 20)
-    # AZ270_EL_POS20 = (270, 20)
-    # AZ315_EL_POS20 = (315, 20)
+    AZ000_EL_0 = (0,   0)
+    AZ045_EL_0 = (45,  0)
+    AZ090_EL_0 = (90,  0)
+    AZ135_EL_0 = (135, 0)
+    AZ180_EL_0 = (180, 0)
+    AZ225_EL_0 = (225, 0)
+    AZ270_EL_0 = (270, 0)
+    AZ315_EL_0 = (315, 0)
+    AZ000_EL_NEG20 = (0,   -20)
+    AZ045_EL_NEG20 = (45,  -20)
+    AZ090_EL_NEG20 = (90,  -20)
+    AZ135_EL_NEG20 = (135, -20)
+    AZ180_EL_NEG20 = (180, -20)
+    AZ225_EL_NEG20 = (225, -20)
+    AZ270_EL_NEG20 = (270, -20)
+    AZ315_EL_NEG20 = (315, -20)
+    AZ000_EL_POS20 = (0,   20)
+    AZ045_EL_POS20 = (45,  20)
+    AZ090_EL_POS20 = (90,  20)
+    AZ135_EL_POS20 = (135, 20)
+    AZ180_EL_POS20 = (180, 20)
+    AZ225_EL_POS20 = (225, 20)
+    AZ270_EL_POS20 = (270, 20)
+    AZ315_EL_POS20 = (315, 20)
 
 
 # ---------------------------------------------------------------------------
@@ -641,18 +645,25 @@ class CameraPoseFinder:
         #     "image 1 completely unchanged."
         #     "Only modify the texture and material appearance."
         # )
+        # prompt = (
+        #     "This is a texture transfer task. Image 1 is a 3D-rendered mesh that must "
+        #     "keep its exact geometry, silhouette, pose, proportions, and camera angle — "
+        #     "do not move, rotate, reshape, or re-frame anything in image 1. "
+        #     "Image 2 is only a material/texture reference: copy its surface colors, "
+        #     "patterns, and material appearance (e.g. roughness, reflectivity, print details) "
+        #     "onto the object in image 1, as if re-skinning the same 3D model with a new "
+        #     "texture map. "
+        #     "Do not import any shape, pose, or structural details from image 2 — only its "
+        #     "surface appearance. "
+        #     "Output should look identical to image 1 in geometry and layout, but with "
+        #     "image 2's texture applied."
+        # )
         prompt = (
-            "This is a texture transfer task. Image 1 is a 3D-rendered mesh that must "
-            "keep its exact geometry, silhouette, pose, proportions, and camera angle — "
-            "do not move, rotate, reshape, or re-frame anything in image 1. "
-            "Image 2 is only a material/texture reference: copy its surface colors, "
-            "patterns, and material appearance (e.g. roughness, reflectivity, print details) "
-            "onto the object in image 1, as if re-skinning the same 3D model with a new "
-            "texture map. "
-            "Do not import any shape, pose, or structural details from image 2 — only its "
-            "surface appearance. "
-            "Output should look identical to image 1 in geometry and layout, but with "
-            "image 2's texture applied."
+            "Improve only the surface texture detail of the object in this image — "
+            "Preserve color palette and shading and focus on the light. "
+            "Do not change the object's geometry, silhouette, pose, proportions, "
+            "Only the texture fidelity should change; everything else must remain pixel-for-pixel "
+            "consistent with the input."
         )
 
         gen_kwargs = dict(
@@ -667,6 +678,7 @@ class CameraPoseFinder:
             result = self.flux_pipe(
                 prompt=prompt,
                 image=[rendered_512, target_512],
+                # image=[rendered_512],
                 **gen_kwargs,
             ).images[0]
 
@@ -792,6 +804,23 @@ class CameraPoseFinder:
 
         return target_extrinsic, target_intrinsic
 
+    def save_found_pose_render(self, img_name: str, extrinsic: torch.Tensor):
+        """
+        Render the mesh at the R,T found by VGGT-Omega and save to view_path
+        so the quality of pose estimation can be visually inspected.
+        """
+        R_found = extrinsic[:3, :3].cpu().numpy()
+        T_found = extrinsic[:3, 3].cpu().numpy()
+        rendered = self.mesh_renderer.render(
+            image_size=self.original_image_size,
+            R=R_found,
+            T=T_found,
+        )
+        rendered_np = rendered[0, ..., :3].cpu().numpy()
+        out_path = os.path.join(self.view_path, f"_found_pose_{img_name}.png")
+        plt.imsave(out_path, np.clip(rendered_np, 0.0, 1.0))
+        print(f"Found-pose render saved: {out_path}")
+
     def get_opencv_camera_matrix(self, azimuth_deg, elevation_deg, distance_from_origin):
         azimuth_rad = np.deg2rad(azimuth_deg)
         elevation_rad = np.deg2rad(elevation_deg)
@@ -853,6 +882,7 @@ initial_extrinsic_B_with_pose_A, initial_intrinsic = pose_finder.get_vggt_initia
     image_B_with_pose_A_path, all_Rs, all_Ts, "B_with_pose_A")
 print(f"\nVGGT Initial Extrinsic (3x4) for image B_with_pose_A:\n", initial_extrinsic_B_with_pose_A)
 print(f"\nVGGT Initial Intrinsic (3x3) for image B_with_pose_A:\n", initial_intrinsic)
+pose_finder.save_found_pose_render("B_with_pose_A", initial_extrinsic_B_with_pose_A)
 
 # --- Step 2: Find camera for B ---
 temp_path = os.path.join(os.path.dirname(image_B_path), "temp_views_B")
@@ -862,6 +892,7 @@ initial_extrinsic_B, initial_intrinsic = pose_finder.get_vggt_initial_guess(
     image_B_path, all_Rs, all_Ts, "B")
 print(f"\nVGGT Initial Extrinsic (3x4) for image B:\n", initial_extrinsic_B)
 print(f"\nVGGT Initial Intrinsic (3x3) for image B:\n", initial_intrinsic)
+pose_finder.save_found_pose_render("B", initial_extrinsic_B)
 
 # --- Step 3: Find camera for B prime ---
 temp_path = os.path.join(os.path.dirname(image_B_prime_path), "temp_views_B_prime")
@@ -871,6 +902,7 @@ initial_extrinsic_B_prime, initial_intrinsic = pose_finder.get_vggt_initial_gues
     image_B_prime_path, all_Rs, all_Ts, "B_prime")
 print(f"\nVGGT Initial Extrinsic (3x4) for image B':\n", initial_extrinsic_B_prime)
 print(f"\nVGGT Initial Intrinsic (3x3) for image B':\n", initial_intrinsic)
+pose_finder.save_found_pose_render("B_prime", initial_extrinsic_B_prime)
 
 # --- Step 4: Compute final camera via relative pose transfer ---
 final_B_prime_extrinsic = compute_new_pose_from_relative(
